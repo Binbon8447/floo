@@ -1377,6 +1377,7 @@ pub fn main() !void {
         std.debug.print("[WARN] Client is using the placeholder token '{s}'. Update configs to a secret value.\n", .{config.DEFAULT_TOKEN});
     }
 
+    const local_host: []const u8 = cfg.local_host;
     var local_port = cfg.local_port;
     var remote_host: []const u8 = cfg.remote_host;
     var remote_port = cfg.remote_port;
@@ -1385,7 +1386,7 @@ pub fn main() !void {
 
     std.debug.print("Floo Tunnel Client (flooc-blocking)\n", .{});
     std.debug.print("====================================\n\n", .{});
-    std.debug.print("[CONFIG] Local:  127.0.0.1:{}\n", .{local_port});
+    std.debug.print("[CONFIG] Local:  {s}:{}\n", .{ local_host, local_port });
     std.debug.print("[CONFIG] Remote: {s}:{}\n", .{ remote_host, remote_port });
     std.debug.print("[CONFIG] Target: {s}:{}\n", .{ target_host, target_port });
     std.debug.print("[CONFIG] Transport: {any}\n", .{cfg.transport});
@@ -1642,11 +1643,11 @@ pub fn main() !void {
 
         try posix.setsockopt(listen_fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, &std.mem.toBytes(@as(c_int, 1)));
 
-        const local_addr = try std.net.Address.parseIp4("127.0.0.1", local_port);
+        const local_addr = try std.net.Address.parseIp4(local_host, local_port);
         try posix.bind(listen_fd, &local_addr.any, local_addr.getOsSockLen());
         try posix.listen(listen_fd, 128);
 
-        std.debug.print("[LISTENER] Listening on 127.0.0.1:{}\n", .{local_port});
+        std.debug.print("[LISTENER] Listening on {s}:{}\n", .{ local_host, local_port });
         std.debug.print("[READY] Client ready. Press Ctrl+C to stop.\n\n", .{});
 
         // Accept loop with round-robin distribution

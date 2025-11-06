@@ -297,6 +297,7 @@ pub const ServerConfig = struct {
 
 pub const ClientConfig = struct {
     allocator: std.mem.Allocator,
+    local_host: []const u8,
     local_port: u16,
     target_host: []const u8,
     target_port: u16,
@@ -327,6 +328,7 @@ pub const ClientConfig = struct {
     pub fn init(allocator: std.mem.Allocator) !ClientConfig {
         var config = ClientConfig{
             .allocator = allocator,
+            .local_host = undefined,
             .local_port = 9001,
             .target_host = undefined,
             .target_port = 8080,
@@ -356,6 +358,9 @@ pub const ClientConfig = struct {
         };
         errdefer config.services.deinit();
 
+        config.local_host = try dupString(allocator, "127.0.0.1");
+        errdefer allocator.free(config.local_host);
+
         config.target_host = try dupString(allocator, "127.0.0.1");
         errdefer allocator.free(config.target_host);
 
@@ -384,6 +389,7 @@ pub const ClientConfig = struct {
             entry.value_ptr.deinit(self.allocator);
         }
         self.services.deinit();
+        self.allocator.free(self.local_host);
         self.allocator.free(self.target_host);
         self.allocator.free(self.remote_host);
         self.allocator.free(self.cipher);
@@ -478,7 +484,10 @@ pub const ClientConfig = struct {
                     }
                 }
             } else {
-                if (std.mem.eql(u8, key, "local_port")) {
+                if (std.mem.eql(u8, key, "local_host")) {
+                    allocator.free(config.local_host);
+                    config.local_host = try dupString(allocator, value);
+                } else if (std.mem.eql(u8, key, "local_port")) {
                     config.local_port = std.fmt.parseInt(u16, value, 10) catch config.local_port;
                 } else if (std.mem.eql(u8, key, "remote_host")) {
                     allocator.free(config.remote_host);
