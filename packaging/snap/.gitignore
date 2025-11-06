@@ -1,0 +1,10 @@
+# Snap build artifacts
+*.snap
+parts/
+stage/
+prime/
+*.snapcraft
+
+# Snapcraft state
+.snapcraft/
+__pycache__/

@@ -1,0 +1,5 @@
+flooc usr/bin
+floos usr/bin
+README.md usr/share/doc/floo
+flooc.toml.example usr/share/doc/floo/examples
+floos.toml.example usr/share/doc/floo/examples

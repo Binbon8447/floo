@@ -1,0 +1,11 @@
+# Ignore downloaded release artifacts
+*.tar.gz
+*.zip
+*.deb
+
+# Ignore build directories
+build-deb/
+apt-repo/
+
+# Ignore temporary checksum files
+checksums.txt

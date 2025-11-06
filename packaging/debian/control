@@ -1,0 +1,28 @@
+Source: floo
+Section: net
+Priority: optional
+Maintainer: Your Name <your.email@example.com>
+Build-Depends: debhelper (>= 10)
+Standards-Version: 4.5.0
+Homepage: https://github.com/YUX/floo
+Vcs-Git: https://github.com/YUX/floo.git
+Vcs-Browser: https://github.com/YUX/floo
+
+Package: floo
+Architecture: amd64 arm64
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Secure, high-performance tunneling in Zig
+ Floo is a high-throughput tunneling solution written in Zig with zero
+ dependencies. It provides secure tunneling using Noise XX protocol with
+ multiple AEAD ciphers.
+ .
+ Features:
+  - 29.4 Gbps throughput with AEGIS-128L cipher
+  - Zero runtime dependencies
+  - Reverse and forward tunneling modes
+  - SOCKS5 and HTTP CONNECT proxy support
+  - Hot config reload with SIGHUP
+  - Built-in diagnostics (--doctor, --ping)
+  - Automatic reconnection with exponential backoff
+ .
+ This package includes both the client (flooc) and server (floos) binaries.

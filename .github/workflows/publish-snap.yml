@@ -1,0 +1,92 @@
+name: Publish Snap
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (e.g., 0.1.2)'
+        required: true
+
+jobs:
+  build-snap:
+    name: Build and Publish Snap
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        architecture:
+          - amd64
+          - arm64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            VERSION="${{ github.event.inputs.version }}"
+          fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Building version: ${VERSION}"
+
+      - name: Update snapcraft.yaml version
+        run: |
+          cd packaging/snap
+          sed -i "s/^version:.*/version: '${{ steps.version.outputs.version }}'/" snapcraft.yaml
+
+      - name: Build Snap
+        uses: snapcore/action-build@v1
+        id: build-snap
+        with:
+          path: packaging/snap
+
+      - name: Upload Snap artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: snap-${{ matrix.architecture }}
+          path: ${{ steps.build-snap.outputs.snap }}
+
+      - name: Publish to Snap Store
+        if: github.event_name == 'release' && secrets.SNAPCRAFT_TOKEN != ''
+        uses: snapcore/action-publish@v1
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_TOKEN }}
+        with:
+          snap: ${{ steps.build-snap.outputs.snap }}
+          release: stable
+
+  publish-summary:
+    name: Publish Summary
+    runs-on: ubuntu-latest
+    needs: build-snap
+    if: always()
+
+    steps:
+      - name: Summary
+        run: |
+          echo "## Snap Build Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Version: ${{ needs.build-snap.outputs.version || github.event.inputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ secrets.SNAPCRAFT_TOKEN }}" != "" ]; then
+            echo "✅ Published to Snap Store" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Users can install with:" >> $GITHUB_STEP_SUMMARY
+            echo '```bash' >> $GITHUB_STEP_SUMMARY
+            echo "sudo snap install floo" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ Not published (SNAPCRAFT_TOKEN secret not set)" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "To enable automatic publishing:" >> $GITHUB_STEP_SUMMARY
+            echo "1. Register on https://snapcraft.io/" >> $GITHUB_STEP_SUMMARY
+            echo "2. Export credentials: snapcraft export-login --snaps=floo --channels=stable -" >> $GITHUB_STEP_SUMMARY
+            echo "3. Add as SNAPCRAFT_TOKEN secret in GitHub repo" >> $GITHUB_STEP_SUMMARY
+          fi

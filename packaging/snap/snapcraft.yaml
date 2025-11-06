@@ -1,0 +1,99 @@
+name: floo
+base: core22
+version: '0.1.2'
+summary: Secure, high-performance tunneling in Zig
+description: |
+  Floo is a high-throughput tunneling solution written in Zig with zero
+  dependencies. It provides secure tunneling using Noise XX protocol with
+  multiple AEAD ciphers.
+
+  Features:
+  - 29.4 Gbps throughput with AEGIS-128L cipher
+  - Zero runtime dependencies
+  - Reverse and forward tunneling modes
+  - SOCKS5 and HTTP CONNECT proxy support
+  - Hot config reload with SIGHUP
+  - Built-in diagnostics (--doctor, --ping)
+  - Automatic reconnection with exponential backoff
+
+  This snap includes both the client (flooc) and server (floos) binaries.
+
+grade: stable
+confinement: strict
+
+architectures:
+  - build-on: amd64
+  - build-on: arm64
+
+apps:
+  flooc:
+    command: bin/flooc
+    plugs:
+      - network
+      - network-bind
+      - home
+
+  floos:
+    command: bin/floos
+    plugs:
+      - network
+      - network-bind
+      - network-control
+      - home
+    daemon: simple
+    restart-condition: on-failure
+
+parts:
+  floo:
+    plugin: dump
+    source: https://github.com/YUX/floo/releases/download/v${SNAPCRAFT_PROJECT_VERSION}/floo-${SNAPCRAFT_ARCH_TRIPLET}.tar.gz
+    source-type: tar
+    override-build: |
+      # Determine the correct artifact name based on architecture
+      case "${SNAPCRAFT_TARGET_ARCH}" in
+        amd64)
+          ARTIFACT="floo-x86_64-linux-gnu-haswell.tar.gz"
+          ;;
+        arm64)
+          ARTIFACT="floo-aarch64-linux-gnu.tar.gz"
+          ;;
+        *)
+          echo "Unsupported architecture: ${SNAPCRAFT_TARGET_ARCH}"
+          exit 1
+          ;;
+      esac
+
+      # Download the correct artifact
+      wget -O /tmp/floo.tar.gz "https://github.com/YUX/floo/releases/download/v${SNAPCRAFT_PROJECT_VERSION}/${ARTIFACT}"
+
+      # Extract
+      mkdir -p /tmp/floo-extract
+      tar xzf /tmp/floo.tar.gz -C /tmp/floo-extract --strip-components=1
+
+      # Install binaries
+      mkdir -p ${SNAPCRAFT_PART_INSTALL}/bin
+      cp /tmp/floo-extract/flooc ${SNAPCRAFT_PART_INSTALL}/bin/
+      cp /tmp/floo-extract/floos ${SNAPCRAFT_PART_INSTALL}/bin/
+      chmod 755 ${SNAPCRAFT_PART_INSTALL}/bin/flooc
+      chmod 755 ${SNAPCRAFT_PART_INSTALL}/bin/floos
+
+      # Install documentation
+      mkdir -p ${SNAPCRAFT_PART_INSTALL}/share/doc/floo
+      cp /tmp/floo-extract/README.md ${SNAPCRAFT_PART_INSTALL}/share/doc/floo/
+
+      # Install example configs
+      mkdir -p ${SNAPCRAFT_PART_INSTALL}/share/doc/floo/examples
+      cp /tmp/floo-extract/*.toml.example ${SNAPCRAFT_PART_INSTALL}/share/doc/floo/examples/
+
+      # Cleanup
+      rm -rf /tmp/floo.tar.gz /tmp/floo-extract
+    build-packages:
+      - wget
+    stage:
+      - bin/flooc
+      - bin/floos
+      - share/doc/floo/*
+
+plugs:
+  home:
+    read: all

@@ -122,7 +122,40 @@ Floo (ChaCha20)     █▊                                                   3.5
 
 ## Installation
 
-### Option 1: Pre-built Binaries (Recommended)
+### Option 1: Package Managers (Easiest)
+
+**Homebrew (macOS)**:
+```bash
+brew tap YUX/floo
+brew install floo
+```
+
+**AUR (Arch Linux)**:
+```bash
+yay -S floo
+# or
+paru -S floo
+```
+
+**APT (Debian/Ubuntu)**:
+```bash
+# Add repository
+curl -fsSL https://yux.github.io/floo-apt/pubkey.gpg | sudo gpg --dearmor -o /usr/share/keyrings/floo.gpg
+echo 'deb [signed-by=/usr/share/keyrings/floo.gpg] https://yux.github.io/floo-apt stable main' | sudo tee /etc/apt/sources.list.d/floo.list
+
+# Install
+sudo apt update
+sudo apt install floo
+```
+
+**Snap (Universal Linux)**:
+```bash
+sudo snap install floo
+```
+
+> **Note:** Package manager releases will be available after v0.1.2 is tagged. See [packaging/README.md](packaging/README.md) for maintainer instructions.
+
+### Option 2: Pre-built Binaries
 
 [**Download from releases**](https://github.com/YUX/floo/releases/tag/nightly):
 
@@ -134,7 +167,7 @@ cd floo-*/
 ./floos --version
 ```
 
-### Option 2: Build from Source
+### Option 3: Build from Source
 
 **Requirements:** Zig 0.15.x
 
