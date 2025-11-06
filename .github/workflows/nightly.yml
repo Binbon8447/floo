@@ -65,12 +65,18 @@ jobs:
 
           ls -lh release-assets/
 
-      - name: Delete old nightly release
+      - name: Delete old nightly release and tag
         run: |
           gh release delete nightly --yes || true
           git push origin :refs/tags/nightly || true
+          git tag -d nightly || true
         env:
           GH_TOKEN: ${{ github.token }}
+
+      - name: Create new nightly tag
+        run: |
+          git tag nightly
+          git push origin nightly
 
       - name: Create nightly release
         run: |
