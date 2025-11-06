@@ -39,17 +39,26 @@ jobs:
         run: |
           mkdir -p release-assets
 
-          # Package each platform
-          for target in x86_64-linux-gnu x86_64-linux-gnu-haswell aarch64-linux-gnu x86_64-macos aarch64-macos; do
-            if [ -d "zig-out/release/$target" ]; then
-              mkdir -p "dist/$target"
-              cp zig-out/release/$target/flooc "dist/$target/"
-              cp zig-out/release/$target/floos "dist/$target/"
-              cp README.md flooc.toml.example floos.toml.example "dist/$target/"
+          # Package each platform with descriptive names
+          declare -A targets=(
+            ["x86_64-linux-gnu"]="floo-x86_64-linux"
+            ["x86_64-linux-gnu-haswell"]="floo-x86_64-linux-haswell"
+            ["aarch64-linux-gnu"]="floo-aarch64-linux-rpi"
+            ["x86_64-macos"]="floo-x86_64-macos"
+            ["aarch64-macos"]="floo-aarch64-macos-m1"
+          )
 
-              # Create tarball
+          for target in "${!targets[@]}"; do
+            if [ -d "zig-out/release/$target" ]; then
+              output_name="${targets[$target]}"
+              mkdir -p "dist/$output_name"
+              cp zig-out/release/$target/flooc "dist/$output_name/"
+              cp zig-out/release/$target/floos "dist/$output_name/"
+              cp README.md flooc.toml.example floos.toml.example "dist/$output_name/"
+
+              # Create tarball with descriptive name
               cd dist
-              tar czf "../release-assets/floo-$target.tar.gz" "$target/"
+              tar czf "../release-assets/${output_name}.tar.gz" "$output_name/"
               cd ..
             fi
           done
@@ -86,10 +95,10 @@ jobs:
 
           | Platform | File | Recommended For |
           |----------|------|-----------------|
-          | **Linux ARM64** | \`floo-aarch64-linux-gnu.tar.gz\` | Raspberry Pi, ARM servers |
-          | **Linux x86_64 (Haswell)** | \`floo-x86_64-linux-gnu-haswell.tar.gz\` | Modern Intel/AMD (2013+) |
-          | **Linux x86_64** | \`floo-x86_64-linux-gnu.tar.gz\` | Older/generic x86_64 |
-          | **macOS Apple Silicon** | \`floo-aarch64-macos.tar.gz\` | M1/M2/M3/M4 Macs |
+          | **Raspberry Pi / ARM64 Linux** | \`floo-aarch64-linux-rpi.tar.gz\` | Raspberry Pi 3/4/5, ARM servers |
+          | **Linux x86_64 (Haswell+)** | \`floo-x86_64-linux-haswell.tar.gz\` | Modern Intel/AMD (2013+) with AES-NI |
+          | **Linux x86_64 (Generic)** | \`floo-x86_64-linux.tar.gz\` | Older/generic x86_64 CPUs |
+          | **macOS Apple Silicon** | \`floo-aarch64-macos-m1.tar.gz\` | M1/M2/M3/M4 Macs |
           | **macOS Intel** | \`floo-x86_64-macos.tar.gz\` | Intel Macs |
 
           ### ⚠️ Note
