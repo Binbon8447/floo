@@ -1,0 +1,40 @@
+# Floo Tunnel Server Configuration
+# Copy this file to floos.toml and customise for your deployment.
+# Replace placeholder secrets before allowing non-test traffic.
+
+[server]
+port = 8443
+host = "0.0.0.0"
+cipher = "aegis128l"                      # Options: aegis128l (fastest), aegis256, aes128gcm, aes256gcm, chacha20poly1305, none
+                                          # Recommended: aegis128l for best performance (29.4 Gbps on M1)
+                                          # Set to "none" to disable encryption (not recommended)
+psk = "replace-me-with-a-strong-psk"
+default_token = "replace-me-with-a-token" # Used for services that omit an explicit token
+heartbeat_interval_seconds = 30
+
+# Performance & liveness tuning
+udp_timeout_seconds = 60
+socket_buffer_size = 8_388_608            # 8 MiB per socket keeps high-bandwidth links fed
+tcp_nodelay = true
+tcp_keepalive = true
+tcp_keepalive_idle = 60
+tcp_keepalive_interval = 10
+tcp_keepalive_count = 3
+
+# TCP service example: publish an internal web app
+[server.services.web]
+id = 1
+transport = "tcp"
+target_host = "10.0.0.10"
+target_port = 80
+token = "web-service-token"
+# socket_buffer_size = 8_388_608         # Override per-service if required
+
+# UDP service example: forward DNS requests
+[server.services.dns]
+id = 2
+transport = "udp"
+target_host = "10.0.0.53"
+target_port = 53
+token = "dns-service-token"
+# udp_timeout_seconds = 30               # Optional: per-service timeout for UDP streams

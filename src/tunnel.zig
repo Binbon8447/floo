@@ -1,0 +1,438 @@
+const std = @import("std");
+
+/// Tunnel message types
+pub const MessageType = enum(u8) {
+    /// Client->Server: Request to connect to target
+    connect = 0x01,
+    /// Bidirectional: Data transfer (TCP)
+    data = 0x02,
+    /// Bidirectional: Close a stream
+    close = 0x03,
+    /// Server->Client: Acknowledge connection
+    connect_ack = 0x04,
+    /// Server->Client: Connection failed
+    connect_error = 0x05,
+    /// Bidirectional: UDP packet data
+    udp_data = 0x06,
+    /// Bidirectional: Heartbeat to keep connection alive
+    heartbeat = 0x07,
+};
+
+/// Stream ID for multiplexing multiple connections over one tunnel
+pub const StreamId = u32;
+
+/// Service ID for identifying different services over one tunnel
+/// Each service is an independent port forward with its own protocol (TCP/UDP)
+pub const ServiceId = u16;
+
+/// Connect message: Request to forward to a target
+pub const ConnectMsg = struct {
+    service_id: ServiceId,
+    stream_id: StreamId,
+    target_host: []const u8,
+    target_port: u16,
+    token: []const u8, // Authentication token for this service
+
+    pub fn encode(self: ConnectMsg, allocator: std.mem.Allocator) ![]u8 {
+        // Format: [type:1][service_id:2][stream_id:4][port:2][host_len:2][host...][token_len:2][token...]
+        const total_len = 1 + 2 + 4 + 2 + 2 + self.target_host.len + 2 + self.token.len;
+        const buf = try allocator.alloc(u8, total_len);
+
+        buf[0] = @intFromEnum(MessageType.connect);
+        std.mem.writeInt(u16, buf[1..3], self.service_id, .big);
+        std.mem.writeInt(u32, buf[3..7], self.stream_id, .big);
+        std.mem.writeInt(u16, buf[7..9], self.target_port, .big);
+        std.mem.writeInt(u16, buf[9..11], @intCast(self.target_host.len), .big);
+        @memcpy(buf[11 .. 11 + self.target_host.len], self.target_host);
+
+        const token_offset = 11 + self.target_host.len;
+        std.mem.writeInt(u16, buf[token_offset .. token_offset + 2], @intCast(self.token.len), .big);
+        @memcpy(buf[token_offset + 2 .. token_offset + 2 + self.token.len], self.token);
+
+        return buf;
+    }
+
+    /// Encode directly into provided buffer (no allocation!)
+    /// Returns the number of bytes written
+    pub fn encodeInto(self: ConnectMsg, buffer: []u8) !usize {
+        // Format: [type:1][service_id:2][stream_id:4][port:2][host_len:2][host...][token_len:2][token...]
+        const total_len = 1 + 2 + 4 + 2 + 2 + self.target_host.len + 2 + self.token.len;
+        if (buffer.len < total_len) return error.BufferTooSmall;
+
+        buffer[0] = @intFromEnum(MessageType.connect);
+        std.mem.writeInt(u16, buffer[1..3], self.service_id, .big);
+        std.mem.writeInt(u32, buffer[3..7], self.stream_id, .big);
+        std.mem.writeInt(u16, buffer[7..9], self.target_port, .big);
+        std.mem.writeInt(u16, buffer[9..11], @intCast(self.target_host.len), .big);
+        @memcpy(buffer[11 .. 11 + self.target_host.len], self.target_host);
+
+        const token_offset = 11 + self.target_host.len;
+        std.mem.writeInt(u16, buffer[token_offset..][0..2], @intCast(self.token.len), .big);
+        @memcpy(buffer[token_offset + 2 .. token_offset + 2 + self.token.len], self.token);
+
+        return total_len;
+    }
+
+    pub fn decode(data: []const u8, allocator: std.mem.Allocator) !ConnectMsg {
+        if (data.len < 11) return error.InvalidMessage;
+        if (data[0] != @intFromEnum(MessageType.connect)) return error.InvalidMessageType;
+
+        const service_id = std.mem.readInt(u16, data[1..3], .big);
+        const stream_id = std.mem.readInt(u32, data[3..7], .big);
+        const port = std.mem.readInt(u16, data[7..9], .big);
+        const host_len = std.mem.readInt(u16, data[9..11], .big);
+
+        if (data.len < 11 + host_len + 2) return error.InvalidMessage;
+
+        const host = try allocator.alloc(u8, host_len);
+        @memcpy(host, data[11 .. 11 + host_len]);
+
+        const token_offset = 11 + host_len;
+        const token_len = std.mem.readInt(u16, data[token_offset..][0..2], .big);
+
+        if (data.len < token_offset + 2 + token_len) return error.InvalidMessage;
+
+        const token = try allocator.alloc(u8, token_len);
+        @memcpy(token, data[token_offset + 2 .. token_offset + 2 + token_len]);
+
+        return ConnectMsg{
+            .service_id = service_id,
+            .stream_id = stream_id,
+            .target_host = host,
+            .target_port = port,
+            .token = token,
+        };
+    }
+};
+
+/// ConnectAck message: Connection succeeded
+pub const ConnectAckMsg = struct {
+    service_id: ServiceId,
+    stream_id: StreamId,
+
+    pub fn encode(self: ConnectAckMsg, allocator: std.mem.Allocator) ![]u8 {
+        const buf = try allocator.alloc(u8, 7);
+        buf[0] = @intFromEnum(MessageType.connect_ack);
+        std.mem.writeInt(u16, buf[1..3], self.service_id, .big);
+        std.mem.writeInt(u32, buf[3..7], self.stream_id, .big);
+        return buf;
+    }
+
+    /// Encode directly into provided buffer (no allocation!)
+    /// Returns the number of bytes written
+    pub fn encodeInto(self: ConnectAckMsg, buffer: []u8) !usize {
+        const total_len = 7;
+        if (buffer.len < total_len) return error.BufferTooSmall;
+
+        buffer[0] = @intFromEnum(MessageType.connect_ack);
+        std.mem.writeInt(u16, buffer[1..3], self.service_id, .big);
+        std.mem.writeInt(u32, buffer[3..7], self.stream_id, .big);
+
+        return total_len;
+    }
+
+    pub fn decode(data: []const u8) !ConnectAckMsg {
+        if (data.len < 7) return error.InvalidMessage;
+        if (data[0] != @intFromEnum(MessageType.connect_ack)) return error.InvalidMessageType;
+
+        return ConnectAckMsg{
+            .service_id = std.mem.readInt(u16, data[1..3], .big),
+            .stream_id = std.mem.readInt(u32, data[3..7], .big),
+        };
+    }
+};
+
+/// ConnectError message: Connection failed
+pub const ConnectErrorMsg = struct {
+    service_id: ServiceId,
+    stream_id: StreamId,
+    error_msg: []const u8,
+
+    pub fn encode(self: ConnectErrorMsg, allocator: std.mem.Allocator) ![]u8 {
+        const total_len = 1 + 2 + 4 + 2 + self.error_msg.len;
+        const buf = try allocator.alloc(u8, total_len);
+
+        buf[0] = @intFromEnum(MessageType.connect_error);
+        std.mem.writeInt(u16, buf[1..3], self.service_id, .big);
+        std.mem.writeInt(u32, buf[3..7], self.stream_id, .big);
+        std.mem.writeInt(u16, buf[7..9], @intCast(self.error_msg.len), .big);
+        @memcpy(buf[9 .. 9 + self.error_msg.len], self.error_msg);
+
+        return buf;
+    }
+
+    /// Encode directly into provided buffer (no allocation!)
+    /// Returns the number of bytes written
+    pub fn encodeInto(self: ConnectErrorMsg, buffer: []u8) !usize {
+        const total_len = 1 + 2 + 4 + 2 + self.error_msg.len;
+        if (buffer.len < total_len) return error.BufferTooSmall;
+
+        buffer[0] = @intFromEnum(MessageType.connect_error);
+        std.mem.writeInt(u16, buffer[1..3], self.service_id, .big);
+        std.mem.writeInt(u32, buffer[3..7], self.stream_id, .big);
+        std.mem.writeInt(u16, buffer[7..9], @intCast(self.error_msg.len), .big);
+        @memcpy(buffer[9 .. 9 + self.error_msg.len], self.error_msg);
+
+        return total_len;
+    }
+
+    pub fn decode(data: []const u8, allocator: std.mem.Allocator) !ConnectErrorMsg {
+        if (data.len < 9) return error.InvalidMessage;
+        if (data[0] != @intFromEnum(MessageType.connect_error)) return error.InvalidMessageType;
+
+        const service_id = std.mem.readInt(u16, data[1..3], .big);
+        const stream_id = std.mem.readInt(u32, data[3..7], .big);
+        const msg_len = std.mem.readInt(u16, data[7..9], .big);
+
+        if (data.len < 9 + msg_len) return error.InvalidMessage;
+
+        const msg = try allocator.alloc(u8, msg_len);
+        @memcpy(msg, data[9 .. 9 + msg_len]);
+
+        return ConnectErrorMsg{
+            .service_id = service_id,
+            .stream_id = stream_id,
+            .error_msg = msg,
+        };
+    }
+};
+
+/// Data message: Transfer data on a stream
+pub const DataMsg = struct {
+    service_id: ServiceId,
+    stream_id: StreamId,
+    data: []const u8,
+
+    pub fn encode(self: DataMsg, allocator: std.mem.Allocator) ![]u8 {
+        const total_len = 1 + 2 + 4 + self.data.len;
+        const buf = try allocator.alloc(u8, total_len);
+
+        buf[0] = @intFromEnum(MessageType.data);
+        std.mem.writeInt(u16, buf[1..3], self.service_id, .big);
+        std.mem.writeInt(u32, buf[3..7], self.stream_id, .big);
+        @memcpy(buf[7 .. 7 + self.data.len], self.data);
+
+        return buf;
+    }
+
+    /// Encode directly into provided buffer (no allocation!)
+    /// Returns the number of bytes written
+    pub fn encodeInto(self: DataMsg, buffer: []u8) !usize {
+        const total_len = 1 + 2 + 4 + self.data.len;
+        if (buffer.len < total_len) return error.BufferTooSmall;
+
+        buffer[0] = @intFromEnum(MessageType.data);
+        std.mem.writeInt(u16, buffer[1..3], self.service_id, .big);
+        std.mem.writeInt(u32, buffer[3..7], self.stream_id, .big);
+        @memcpy(buffer[7 .. 7 + self.data.len], self.data);
+
+        return total_len;
+    }
+
+    pub fn decode(data: []const u8) !DataMsg {
+        if (data.len < 7) return error.InvalidMessage;
+        if (data[0] != @intFromEnum(MessageType.data)) return error.InvalidMessageType;
+
+        return DataMsg{
+            .service_id = std.mem.readInt(u16, data[1..3], .big),
+            .stream_id = std.mem.readInt(u32, data[3..7], .big),
+            .data = data[7..],
+        };
+    }
+};
+
+/// Close message: Close a stream
+pub const CloseMsg = struct {
+    service_id: ServiceId,
+    stream_id: StreamId,
+
+    pub fn encode(self: CloseMsg, allocator: std.mem.Allocator) ![]u8 {
+        const buf = try allocator.alloc(u8, 7);
+        buf[0] = @intFromEnum(MessageType.close);
+        std.mem.writeInt(u16, buf[1..3], self.service_id, .big);
+        std.mem.writeInt(u32, buf[3..7], self.stream_id, .big);
+        return buf;
+    }
+
+    /// Encode directly into provided buffer (no allocation!)
+    /// Returns the number of bytes written
+    pub fn encodeInto(self: CloseMsg, buffer: []u8) !usize {
+        const total_len = 7;
+        if (buffer.len < total_len) return error.BufferTooSmall;
+
+        buffer[0] = @intFromEnum(MessageType.close);
+        std.mem.writeInt(u16, buffer[1..3], self.service_id, .big);
+        std.mem.writeInt(u32, buffer[3..7], self.stream_id, .big);
+
+        return total_len;
+    }
+
+    pub fn decode(data: []const u8) !CloseMsg {
+        if (data.len < 7) return error.InvalidMessage;
+        if (data[0] != @intFromEnum(MessageType.close)) return error.InvalidMessageType;
+
+        return CloseMsg{
+            .service_id = std.mem.readInt(u16, data[1..3], .big),
+            .stream_id = std.mem.readInt(u32, data[3..7], .big),
+        };
+    }
+};
+
+/// UDP Data message: Transfer UDP packet with source address information
+/// Format: [type:1][service_id:2][stream_id:4][addr_len:1][addr_bytes...][port:2][data...]
+/// This preserves UDP source address so replies can be routed correctly
+pub const UdpDataMsg = struct {
+    service_id: ServiceId,
+    stream_id: StreamId,
+    source_addr: []const u8, // IPv4 or IPv6 address bytes
+    source_port: u16,
+    data: []const u8,
+
+    pub fn encode(self: UdpDataMsg, allocator: std.mem.Allocator) ![]u8 {
+        const total_len = 1 + 2 + 4 + 1 + self.source_addr.len + 2 + self.data.len;
+        const buf = try allocator.alloc(u8, total_len);
+
+        buf[0] = @intFromEnum(MessageType.udp_data);
+        std.mem.writeInt(u16, buf[1..3], self.service_id, .big);
+        std.mem.writeInt(u32, buf[3..7], self.stream_id, .big);
+        buf[7] = @intCast(self.source_addr.len);
+        @memcpy(buf[8 .. 8 + self.source_addr.len], self.source_addr);
+        const port_offset = 8 + self.source_addr.len;
+        std.mem.writeInt(u16, buf[port_offset..][0..2], self.source_port, .big);
+        @memcpy(buf[port_offset + 2 ..], self.data);
+
+        return buf;
+    }
+
+    /// Encode directly into provided buffer (no allocation!)
+    pub fn encodeInto(self: UdpDataMsg, buffer: []u8) !usize {
+        const total_len = 1 + 2 + 4 + 1 + self.source_addr.len + 2 + self.data.len;
+        if (buffer.len < total_len) return error.BufferTooSmall;
+
+        buffer[0] = @intFromEnum(MessageType.udp_data);
+        std.mem.writeInt(u16, buffer[1..3], self.service_id, .big);
+        std.mem.writeInt(u32, buffer[3..7], self.stream_id, .big);
+        buffer[7] = @intCast(self.source_addr.len);
+        @memcpy(buffer[8 .. 8 + self.source_addr.len], self.source_addr);
+        const port_offset = 8 + self.source_addr.len;
+        std.mem.writeInt(u16, buffer[port_offset..][0..2], self.source_port, .big);
+        @memcpy(buffer[port_offset + 2 .. total_len], self.data);
+
+        return total_len;
+    }
+
+    pub fn decode(data: []const u8, allocator: std.mem.Allocator) !UdpDataMsg {
+        if (data.len < 10) return error.InvalidMessage; // Minimum: type + service_id + stream_id + addr_len(0) + port
+        if (data[0] != @intFromEnum(MessageType.udp_data)) return error.InvalidMessageType;
+
+        const service_id = std.mem.readInt(u16, data[1..3], .big);
+        const stream_id = std.mem.readInt(u32, data[3..7], .big);
+        const addr_len = data[7];
+
+        if (data.len < 10 + addr_len) return error.InvalidMessage;
+
+        const addr = try allocator.alloc(u8, addr_len);
+        @memcpy(addr, data[8 .. 8 + addr_len]);
+
+        const port_offset = 8 + addr_len;
+        const port = std.mem.readInt(u16, data[port_offset..][0..2], .big);
+
+        return UdpDataMsg{
+            .service_id = service_id,
+            .stream_id = stream_id,
+            .source_addr = addr,
+            .source_port = port,
+            .data = data[port_offset + 2 ..],
+        };
+    }
+};
+
+/// Heartbeat message: Keep connection alive and detect failures
+pub const HeartbeatMsg = struct {
+    /// Timestamp in milliseconds since epoch
+    timestamp: i64,
+
+    pub fn encode(self: HeartbeatMsg, allocator: std.mem.Allocator) ![]u8 {
+        const buf = try allocator.alloc(u8, 9); // type(1) + timestamp(8)
+        buf[0] = @intFromEnum(MessageType.heartbeat);
+        std.mem.writeInt(i64, buf[1..9], self.timestamp, .big);
+        return buf;
+    }
+
+    pub fn encodeInto(self: HeartbeatMsg, buffer: []u8) !usize {
+        if (buffer.len < 9) return error.BufferTooSmall;
+        buffer[0] = @intFromEnum(MessageType.heartbeat);
+        std.mem.writeInt(i64, buffer[1..9], self.timestamp, .big);
+        return 9;
+    }
+
+    pub fn decode(data: []const u8) !HeartbeatMsg {
+        if (data.len < 9) return error.InvalidMessage;
+        if (data[0] != @intFromEnum(MessageType.heartbeat)) return error.InvalidMessageType;
+
+        const timestamp = std.mem.readInt(i64, data[1..9], .big);
+        return HeartbeatMsg{ .timestamp = timestamp };
+    }
+};
+
+// Tests
+test "ConnectMsg encode/decode" {
+    const allocator = std.testing.allocator;
+
+    const msg = ConnectMsg{
+        .service_id = 1,
+        .stream_id = 123,
+        .target_host = "localhost",
+        .target_port = 8080,
+        .token = "test-token",
+    };
+
+    const encoded = try msg.encode(allocator);
+    defer allocator.free(encoded);
+
+    const decoded = try ConnectMsg.decode(encoded, allocator);
+    defer allocator.free(decoded.target_host);
+    defer allocator.free(decoded.token);
+
+    try std.testing.expectEqual(msg.service_id, decoded.service_id);
+    try std.testing.expectEqual(msg.stream_id, decoded.stream_id);
+    try std.testing.expectEqual(msg.target_port, decoded.target_port);
+    try std.testing.expectEqualSlices(u8, msg.target_host, decoded.target_host);
+    try std.testing.expectEqualSlices(u8, msg.token, decoded.token);
+}
+
+test "DataMsg encode/decode" {
+    const allocator = std.testing.allocator;
+
+    const msg = DataMsg{
+        .service_id = 2,
+        .stream_id = 456,
+        .data = "hello world",
+    };
+
+    const encoded = try msg.encode(allocator);
+    defer allocator.free(encoded);
+
+    const decoded = try DataMsg.decode(encoded);
+
+    try std.testing.expectEqual(msg.service_id, decoded.service_id);
+    try std.testing.expectEqual(msg.stream_id, decoded.stream_id);
+    try std.testing.expectEqualSlices(u8, msg.data, decoded.data);
+}
+
+test "CloseMsg encode/decode" {
+    const allocator = std.testing.allocator;
+
+    const msg = CloseMsg{
+        .service_id = 3,
+        .stream_id = 789,
+    };
+
+    const encoded = try msg.encode(allocator);
+    defer allocator.free(encoded);
+
+    const decoded = try CloseMsg.decode(encoded);
+
+    try std.testing.expectEqual(msg.service_id, decoded.service_id);
+    try std.testing.expectEqual(msg.stream_id, decoded.stream_id);
+}

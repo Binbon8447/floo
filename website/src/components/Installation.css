@@ -1,0 +1,149 @@
+.installation {
+  background: var(--bg-secondary);
+}
+
+.installation-content {
+  max-width: 1000px;
+  margin: 0 auto;
+}
+
+.platform-selector {
+  margin-bottom: 3rem;
+}
+
+.selector-title {
+  font-size: 1.5rem;
+  font-weight: 700;
+  margin-bottom: 1.5rem;
+  color: var(--text-primary);
+}
+
+.platform-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 1rem;
+}
+
+.platform-btn {
+  background: var(--bg-tertiary);
+  border: 2px solid rgba(0, 243, 255, 0.2);
+  border-radius: 8px;
+  padding: 1rem;
+  color: var(--text-primary);
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  text-align: left;
+  position: relative;
+}
+
+.platform-btn:hover {
+  border-color: var(--accent-cyan);
+  background: rgba(0, 243, 255, 0.05);
+}
+
+.platform-btn.active {
+  border-color: var(--accent-cyan);
+  background: rgba(0, 243, 255, 0.1);
+  box-shadow: var(--glow-cyan);
+}
+
+.recommended-badge {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--accent-yellow);
+  margin-top: 0.5rem;
+}
+
+.code-block-container {
+  background: var(--bg-tertiary);
+  border: 1px solid rgba(0, 243, 255, 0.2);
+  border-radius: 12px;
+  overflow: hidden;
+  margin-bottom: 2rem;
+}
+
+.code-block-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1rem 1.5rem;
+  background: rgba(0, 243, 255, 0.05);
+  border-bottom: 1px solid rgba(0, 243, 255, 0.2);
+}
+
+.code-block-title {
+  font-weight: 600;
+  color: var(--accent-cyan);
+}
+
+.copy-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  background: rgba(0, 243, 255, 0.1);
+  border: 1px solid var(--accent-cyan);
+  border-radius: 6px;
+  color: var(--accent-cyan);
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.copy-btn:hover {
+  background: var(--accent-cyan);
+  color: var(--bg-primary);
+  box-shadow: var(--glow-cyan);
+}
+
+.code-block-container pre {
+  margin: 0;
+  padding: 1.5rem;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+}
+
+.docs-links {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 1rem;
+}
+
+.doc-link {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 1.25rem;
+  background: var(--bg-tertiary);
+  border: 1px solid rgba(0, 243, 255, 0.2);
+  border-radius: 8px;
+  color: var(--text-primary);
+  text-decoration: none;
+  font-weight: 600;
+  transition: all 0.3s ease;
+}
+
+.doc-link svg {
+  color: var(--accent-cyan);
+  flex-shrink: 0;
+}
+
+.doc-link:hover {
+  border-color: var(--accent-cyan);
+  box-shadow: var(--glow-cyan);
+  transform: translateY(-2px);
+}
+
+@media (max-width: 768px) {
+  .platform-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .docs-links {
+    grid-template-columns: 1fr;
+  }
+}
