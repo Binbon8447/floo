@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Floo - High-Performance Tunneling in Zig</title>
+    <meta name="description" content="Secure, high-performance tunneling. 29 Gbps, zero dependencies, 671 KB binaries. Expose home services or access remote ones.">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        header {
+            text-align: center;
+            padding: 60px 20px;
+            color: white;
+        }
+        .logo {
+            font-size: 72px;
+            font-weight: 900;
+            letter-spacing: 8px;
+            text-shadow: 4px 4px 8px rgba(0,0,0,0.3);
+            margin-bottom: 20px;
+        }
+        .tagline {
+            font-size: 24px;
+            margin-bottom: 30px;
+            opacity: 0.95;
+        }
+        .stats {
+            display: flex;
+            justify-content: center;
+            gap: 40px;
+            flex-wrap: wrap;
+            margin-top: 30px;
+        }
+        .stat {
+            background: rgba(255,255,255,0.2);
+            backdrop-filter: blur(10px);
+            padding: 20px 30px;
+            border-radius: 12px;
+            border: 2px solid rgba(255,255,255,0.3);
+        }
+        .stat-value {
+            font-size: 32px;
+            font-weight: bold;
+            color: #fff;
+        }
+        .stat-label {
+            font-size: 14px;
+            opacity: 0.9;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        .content {
+            background: white;
+            border-radius: 16px;
+            padding: 60px;
+            margin-top: -40px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }
+        .section {
+            margin-bottom: 60px;
+        }
+        h2 {
+            color: #667eea;
+            margin-bottom: 20px;
+            font-size: 32px;
+            border-bottom: 3px solid #667eea;
+            padding-bottom: 10px;
+        }
+        .quick-start {
+            background: #f8f9fa;
+            border-left: 4px solid #667eea;
+            padding: 30px;
+            border-radius: 8px;
+            margin: 30px 0;
+        }
+        .use-cases {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin: 30px 0;
+        }
+        .use-case {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            border-radius: 12px;
+            transition: transform 0.2s;
+            cursor: pointer;
+        }
+        .use-case:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 30px rgba(102, 126, 234, 0.4);
+        }
+        .use-case h3 {
+            margin-bottom: 15px;
+            color: white;
+        }
+        .comparison {
+            overflow-x: auto;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+        th, td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #eee;
+        }
+        th {
+            background: #667eea;
+            color: white;
+            font-weight: 600;
+        }
+        tr:hover {
+            background: #f8f9fa;
+        }
+        .btn {
+            display: inline-block;
+            padding: 15px 40px;
+            background: #667eea;
+            color: white;
+            text-decoration: none;
+            border-radius: 8px;
+            font-weight: 600;
+            transition: all 0.3s;
+            margin: 10px;
+        }
+        .btn:hover {
+            background: #764ba2;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+        .btn-secondary {
+            background: #6c757d;
+        }
+        .btn-secondary:hover {
+            background: #5a6268;
+        }
+        .feature-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin: 30px 0;
+        }
+        .feature {
+            padding: 20px;
+            border: 2px solid #667eea;
+            border-radius: 8px;
+        }
+        .feature-icon {
+            font-size: 32px;
+            margin-bottom: 10px;
+        }
+        code {
+            background: #f4f4f4;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: 'Monaco', 'Courier New', monospace;
+        }
+        pre {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 20px;
+            border-radius: 8px;
+            overflow-x: auto;
+            margin: 20px 0;
+        }
+        pre code {
+            background: none;
+            color: inherit;
+        }
+        footer {
+            text-align: center;
+            padding: 40px;
+            color: white;
+        }
+        @media (max-width: 768px) {
+            .logo { font-size: 48px; }
+            .stats { gap: 20px; }
+            .content { padding: 30px 20px; }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="container">
+            <div class="logo">FLOO</div>
+            <div class="tagline">Secure Portal Network - Magical Tunneling in Zig</div>
+            <div class="stats">
+                <div class="stat">
+                    <div class="stat-value">29.4 Gbps</div>
+                    <div class="stat-label">Encrypted Speed</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-value">0</div>
+                    <div class="stat-label">Dependencies</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-value">671 KB</div>
+                    <div class="stat-label">Total Size</div>
+                </div>
+            </div>
+            <div style="margin-top: 40px;">
+                <a href="https://github.com/YUX/floo/releases/tag/nightly" class="btn">Download</a>
+                <a href="https://github.com/YUX/floo" class="btn btn-secondary">GitHub</a>
+            </div>
+        </div>
+    </header>
+
+    <div class="container">
+        <div class="content">
+            <div class="section">
+                <h2>🚀 Quick Start</h2>
+                <div class="quick-start">
+                    <h3>Get Started in 3 Steps:</h3>
+                    <ol style="margin-left: 20px; margin-top: 15px;">
+                        <li><strong>Choose your use case below</strong></li>
+                        <li><strong>Download binaries</strong> from <a href="https://github.com/YUX/floo/releases/tag/nightly">GitHub Releases</a></li>
+                        <li><strong>Follow the example guide</strong> (5 minutes to running!)</li>
+                    </ol>
+                </div>
+
+                <div class="use-cases">
+                    <div class="use-case" onclick="location.href='https://github.com/YUX/floo/tree/main/examples/expose-home-server'">
+                        <h3>🏠 Expose Home Server</h3>
+                        <p>Access your Emby/Plex from anywhere. No port forwarding!</p>
+                    </div>
+                    <div class="use-case" onclick="location.href='https://github.com/YUX/floo/tree/main/examples/access-cloud-database'">
+                        <h3>💾 Access Cloud Database</h3>
+                        <p>Securely connect to remote PostgreSQL/MySQL.</p>
+                    </div>
+                    <div class="use-case" onclick="location.href='https://github.com/YUX/floo/tree/main/examples/expose-multiple-services'">
+                        <h3>🔐 Multiple Services</h3>
+                        <p>Expose Emby + SSH through one tunnel.</p>
+                    </div>
+                    <div class="use-case" onclick="location.href='https://github.com/YUX/floo/tree/main/examples/through-corporate-proxy'">
+                        <h3>🏢 Corporate Proxy</h3>
+                        <p>Connect through SOCKS5/HTTP proxy.</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="section">
+                <h2>✨ What is Floo?</h2>
+                <p style="font-size: 18px; margin: 20px 0;">
+                    Floo is a <strong>secure tunneling system</strong> that lets you expose local services through a public server, 
+                    or access remote services through an encrypted tunnel. Think of it as magical fireplaces connecting different networks!
+                </p>
+                
+                <div class="feature-grid">
+                    <div class="feature">
+                        <div class="feature-icon">🔐</div>
+                        <h3>Secure</h3>
+                        <p>Noise XX protocol with PSK. 5 AEAD ciphers. Hardware-accelerated encryption.</p>
+                    </div>
+                    <div class="feature">
+                        <div class="feature-icon">⚡</div>
+                        <h3>Fast</h3>
+                        <p>29.4 Gbps encrypted. 62% faster than Rathole. 194% faster than FRP.</p>
+                    </div>
+                    <div class="feature">
+                        <div class="feature-icon">📦</div>
+                        <h3>Tiny</h3>
+                        <p>671 KB total binaries. Zero dependencies. Pure Zig.</p>
+                    </div>
+                    <div class="feature">
+                        <div class="feature-icon">🔄</div>
+                        <h3>Reliable</h3>
+                        <p>Auto-reconnect. Hot reload. Heartbeat supervision.</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="section comparison">
+                <h2>📊 Performance</h2>
+                <p style="margin: 20px 0;">Benchmarks on Apple M1 MacBook Air (iperf3, single stream):</p>
+                
+                <table>
+                    <tr>
+                        <th>Configuration</th>
+                        <th>Throughput</th>
+                        <th>vs Floo</th>
+                    </tr>
+                    <tr style="background: #e8f5e9;">
+                        <td><strong>Floo (AEGIS-128L)</strong></td>
+                        <td><strong>29.4 Gbps</strong></td>
+                        <td>⭐ Fastest</td>
+                    </tr>
+                    <tr>
+                        <td>Floo (AEGIS-256)</td>
+                        <td>24.5 Gbps</td>
+                        <td>-</td>
+                    </tr>
+                    <tr>
+                        <td>Rathole</td>
+                        <td>18.1 Gbps</td>
+                        <td style="color: #c62828;">-38%</td>
+                    </tr>
+                    <tr>
+                        <td>FRP</td>
+                        <td>10.0 Gbps</td>
+                        <td style="color: #c62828;">-66%</td>
+                    </tr>
+                </table>
+            </div>
+
+            <div class="section">
+                <h2>🎯 Use Cases</h2>
+                
+                <h3>Reverse Mode (Expose Local Services)</h3>
+                <pre><code>Home (Emby behind NAT) → flooc → Tunnel → floos (Public IP) ← Users connect here</code></pre>
+                <p>Perfect for: Home media servers, game servers, IoT devices</p>
+
+                <h3 style="margin-top: 30px;">Forward Mode (Access Remote Services)</h3>
+                <pre><code>Your laptop → flooc → Tunnel → floos → Cloud database</code></pre>
+                <p>Perfect for: Cloud databases, internal APIs, remote development</p>
+            </div>
+
+            <div class="section">
+                <h2>📥 Installation</h2>
+                <pre><code>wget https://github.com/YUX/floo/releases/download/nightly/floo-aarch64-macos-m1.tar.gz
+tar xzf floo-*.tar.gz
+cd floo-*/
+./flooc --version
+./floos --version</code></pre>
+                
+                <p style="margin-top: 20px;">
+                    <strong>Available platforms:</strong> Apple Silicon, Intel Mac, Raspberry Pi, Linux x86_64
+                </p>
+            </div>
+
+            <div class="section">
+                <h2>📚 Documentation</h2>
+                <ul style="font-size: 18px; margin-left: 20px;">
+                    <li><a href="https://github.com/YUX/floo/tree/main/examples">Examples</a> - Real-world configurations</li>
+                    <li><a href="https://github.com/YUX/floo">README</a> - Complete reference</li>
+                    <li><a href="https://github.com/YUX/floo/releases">Releases</a> - Download binaries</li>
+                </ul>
+            </div>
+
+            <div class="section">
+                <h2>🌟 Why Floo?</h2>
+                <ul style="font-size: 18px; margin-left: 20px; line-height: 2;">
+                    <li>✅ <strong>Zero dependencies</strong> - Pure Zig, no external libs</li>
+                    <li>✅ <strong>Tiny binaries</strong> - 671 KB vs 2-24 MB alternatives</li>
+                    <li>✅ <strong>Blazing fast</strong> - 29.4 Gbps encrypted (62-194% faster than alternatives)</li>
+                    <li>✅ <strong>Reverse & forward</strong> - Both tunneling modes supported</li>
+                    <li>✅ <strong>Proxy support</strong> - SOCKS5 and HTTP CONNECT</li>
+                    <li>✅ <strong>Easy diagnostics</strong> - Built-in <code>--doctor</code> and <code>--ping</code></li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <footer>
+        <div class="container">
+            <p style="font-size: 18px; margin-bottom: 20px;">
+                Built with ❤️ in Zig
+            </p>
+            <p>
+                <a href="https://github.com/YUX/floo" style="color: white; margin: 0 15px;">GitHub</a>
+                <a href="https://github.com/YUX/floo/issues" style="color: white; margin: 0 15px;">Issues</a>
+                <a href="https://github.com/YUX/floo/releases" style="color: white; margin: 0 15px;">Releases</a>
+            </p>
+        </div>
+    </footer>
+</body>
+</html>
