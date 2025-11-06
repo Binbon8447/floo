@@ -1,0 +1,9 @@
+# Client Config - Home Machine
+remote_host = "YOUR_SERVER_IP"
+remote_port = 8443
+cipher = "aegis128l"
+psk = "CHANGE-ME"
+default_token = "CHANGE-ME"
+service_id = 1
+num_tunnels = 1
+reconnect_enabled = true

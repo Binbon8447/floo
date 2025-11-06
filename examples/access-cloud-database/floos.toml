@@ -1,0 +1,12 @@
+# Server - Cloud Server
+port = 8443
+host = "0.0.0.0"
+cipher = "aegis128l"
+psk = "CHANGE-ME"
+default_token = "CHANGE-ME"
+
+[server.services.database]
+id = 1
+transport = "tcp"
+target_host = "127.0.0.1"
+target_port = 5432

@@ -1,0 +1,8 @@
+# Client - Serves Multiple Services
+remote_host = "YOUR_SERVER_IP"
+remote_port = 8443
+cipher = "aegis128l"
+psk = "CHANGE-ME"
+default_token = "CHANGE-ME"
+num_tunnels = 2
+reconnect_enabled = true
