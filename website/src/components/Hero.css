@@ -71,8 +71,9 @@
 
 .logo-floo {
   font-size: 6rem;
-  font-weight: 900;
-  letter-spacing: 0.2em;
+  font-weight: 400;
+  font-family: 'UnifrakturMaguntia', 'Old English Text MT', 'Blackletter', serif;
+  letter-spacing: 0.15em;
   background: linear-gradient(135deg, var(--accent-cyan) 0%, var(--accent-purple) 50%, var(--accent-pink) 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;

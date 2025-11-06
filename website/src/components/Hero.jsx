@@ -55,16 +55,20 @@ export default function Hero() {
 
         <div className="hero-stats">
           <div className="stat">
+            <div className="stat-value">0</div>
+            <div className="stat-label">Dependencies</div>
+          </div>
+          <div className="stat">
+            <div className="stat-value">671 KB</div>
+            <div className="stat-label">Total Binary Size</div>
+          </div>
+          <div className="stat">
             <div className="stat-value">62%</div>
             <div className="stat-label">Faster than Rathole</div>
           </div>
           <div className="stat">
             <div className="stat-value">194%</div>
             <div className="stat-label">Faster than FRP</div>
-          </div>
-          <div className="stat">
-            <div className="stat-value">671 KB</div>
-            <div className="stat-label">Total Binary Size</div>
           </div>
         </div>
 
