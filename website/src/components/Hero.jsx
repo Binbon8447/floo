@@ -21,24 +21,19 @@ export default function Hero() {
   return (
     <div className="hero">
       <div className="hero-bg">
-        <div className="flame flame-1"></div>
-        <div className="flame flame-2"></div>
-        <div className="flame flame-3"></div>
-        <div className="portal-glow"></div>
+        <div className="circuit-line circuit-1"></div>
+        <div className="circuit-line circuit-2"></div>
+        <div className="circuit-line circuit-3"></div>
       </div>
 
       <div className="container hero-content">
         <div className="hero-logo">
-          <div className="floo-fireplace">
-            <div className="fireplace-arch">╔═══════════╗</div>
-            <div className="fireplace-fire">🔥 FLOO 🔥</div>
-            <div className="fireplace-base">╚═══════════╝</div>
-          </div>
+          <span className="logo-floo">FLOO</span>
         </div>
 
         <div className="hero-badge">
           <span className="pulse-dot"></span>
-          The Floo Network • Powered by Zig
+          Powered by Zig
         </div>
 
         <h1 className="hero-title">
