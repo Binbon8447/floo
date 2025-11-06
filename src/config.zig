@@ -16,8 +16,8 @@ pub const Transport = enum {
 };
 
 pub const ServiceMode = enum {
-    forward,  // Server connects to target (default, current behavior)
-    reverse,  // Server listens, client connects to target (new!)
+    forward, // Server connects to target (default, current behavior)
+    reverse, // Server listens, client connects to target (new!)
 
     pub fn fromString(s: []const u8) ?ServiceMode {
         if (std.mem.eql(u8, s, "forward")) return .forward;
@@ -37,7 +37,7 @@ pub const ServerServiceConfig = struct {
     mode: ServiceMode,
     target_host: []const u8,
     target_port: u16,
-    local_port: u16,  // For reverse mode: port server listens on
+    local_port: u16, // For reverse mode: port server listens on
     token: []const u8,
 
     fn deinit(self: *ServerServiceConfig, allocator: std.mem.Allocator) void {
@@ -175,10 +175,10 @@ pub const ServerConfig = struct {
                         .name = try dupString(allocator, name),
                         .service_id = 0,
                         .transport = config.transport,
-                        .mode = .forward,  // Default to forward mode
+                        .mode = .forward, // Default to forward mode
                         .target_host = try dupString(allocator, ""),
                         .target_port = 0,
-                        .local_port = 0,  // For reverse mode
+                        .local_port = 0, // For reverse mode
                         .token = try dupString(allocator, ""),
                     };
                     current_section = "server.services";
