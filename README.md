@@ -1,4 +1,10 @@
-# Floo
+```
+  _____.__                 
+_/ ____\  |   ____   ____  
+\   __\|  |  /  _ \ /  _ \ 
+ |  |  |  |_(  <_> |  <_> )
+ |__|  |____/\____/ \____/ 
+```                      
 
 [![Language: Zig](https://img.shields.io/badge/language-Zig-orange.svg)](https://ziglang.org/)
 [![Dependencies: 0](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](build.zig.zon)
@@ -137,19 +143,6 @@ Key points:
 Failures are reported with actionable messages (invalid cipher, weak PSK,
 unreachable host, etc.).
 
-## Performance snapshot (M1 Pro, iperf3, 4 streams)
-
-| Scenario | Throughput |
-|----------|------------|
-| Raw loopback | 72 Gbps |
-| Floo forward (plaintext) | 20 Gbps |
-| Floo forward (AES-256-GCM) | 7.1 Gbps |
-| Floo reverse (AES-256-GCM) | 5.5 Gbps |
-| Rathole 0.4.9 | 13.3 Gbps |
-| FRP 0.51 | 5.9 Gbps |
-
-See `run_benchmarks.sh` for the exact harness (iperf3 + tunnel configs). Results
-were captured on macOS M1; expect higher numbers on desktops/servers.
 
 ## Project layout
 
