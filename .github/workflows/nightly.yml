@@ -25,41 +25,50 @@ jobs:
 
       - name: Build all platforms
         run: |
-          # Build baseline
-          zig build release-all -Drelease_cpu=baseline
-
-          # Build Haswell-optimized
-          mkdir -p zig-out/release-baseline
-          cp -r zig-out/release/x86_64-linux-gnu zig-out/release-baseline/
-          zig build release-all -Drelease_cpu=haswell
-          mv zig-out/release/x86_64-linux-gnu zig-out/release/x86_64-linux-gnu-haswell
-          mv zig-out/release-baseline/x86_64-linux-gnu zig-out/release/
+          zig build release-all
 
       - name: Package artifacts
+        env:
+          RELEASE_TARGETS: |
+            x86_64-linux-gnu
+            x86_64-linux-gnu-haswell
+            x86_64-linux-musl
+            aarch64-linux-gnu
+            aarch64-linux-gnu-neoverse-n1
+            aarch64-linux-gnu-rpi4
+            x86_64-macos
+            x86_64-macos-haswell
+            aarch64-macos-m1
+            x86_64-windows-msvc
+            aarch64-windows-msvc
         run: |
+          set -euo pipefail
           mkdir -p release-assets
 
-          # Package each platform with descriptive names
-          declare -A targets=(
-            ["x86_64-linux-gnu"]="floo-x86_64-linux"
-            ["x86_64-linux-gnu-haswell"]="floo-x86_64-linux-haswell"
-            ["aarch64-linux-gnu"]="floo-aarch64-linux-rpi"
-            ["x86_64-macos"]="floo-x86_64-macos"
-            ["aarch64-macos"]="floo-aarch64-macos-m1"
-          )
+          for target in $RELEASE_TARGETS; do
+            src="zig-out/release/${target}"
+            if [ ! -d "$src" ]; then
+              echo "Skipping missing ${target}"
+              continue
+            fi
+            mkdir -p "dist/${target}"
 
-          for target in "${!targets[@]}"; do
-            if [ -d "zig-out/release/$target" ]; then
-              output_name="${targets[$target]}"
-              mkdir -p "dist/$output_name"
-              cp zig-out/release/$target/flooc "dist/$output_name/"
-              cp zig-out/release/$target/floos "dist/$output_name/"
-              cp README.md flooc.toml.example floos.toml.example "dist/$output_name/"
+            for bin in flooc floos; do
+              if [ -f "$src/${bin}.exe" ]; then
+                cp "$src/${bin}.exe" "dist/${target}/${bin}.exe"
+              elif [ -f "$src/${bin}" ]; then
+                cp "$src/${bin}" "dist/${target}/${bin}"
+              fi
+            done
 
-              # Create tarball with descriptive name
-              cd dist
-              tar czf "../release-assets/${output_name}.tar.gz" "$output_name/"
-              cd ..
+            cp README.md "dist/${target}/"
+            cp configs/flooc.example.toml "dist/${target}/flooc.toml.example"
+            cp configs/floos.example.toml "dist/${target}/floos.toml.example"
+
+            if [[ "$target" == *"windows"* ]]; then
+              (cd dist && zip -rq "../release-assets/floo-${target}.zip" "${target}")
+            else
+              (cd dist && tar czf "../release-assets/floo-${target}.tar.gz" "${target}")
             fi
           done
 
@@ -101,11 +110,17 @@ jobs:
 
           | Platform | File | Recommended For |
           |----------|------|-----------------|
-          | **Raspberry Pi / ARM64 Linux** | \`floo-aarch64-linux-rpi.tar.gz\` | Raspberry Pi 3/4/5, ARM servers |
-          | **Linux x86_64 (Haswell+)** | \`floo-x86_64-linux-haswell.tar.gz\` | Modern Intel/AMD (2013+) with AES-NI |
-          | **Linux x86_64 (Generic)** | \`floo-x86_64-linux.tar.gz\` | Older/generic x86_64 CPUs |
-          | **macOS Apple Silicon** | \`floo-aarch64-macos-m1.tar.gz\` | M1/M2/M3/M4 Macs |
-          | **macOS Intel** | \`floo-x86_64-macos.tar.gz\` | Intel Macs |
+          | **Linux x86_64 (glibc)** | \`floo-x86_64-linux-gnu.tar.gz\` | Generic compatibility |
+          | **Linux x86_64 (Haswell+)** | \`floo-x86_64-linux-gnu-haswell.tar.gz\` | Modern Intel/AMD (AES-NI) |
+          | **Linux x86_64 (musl)** | \`floo-x86_64-linux-musl.tar.gz\` | Alpine/static containers |
+          | **Linux ARM64 (generic)** | \`floo-aarch64-linux-gnu.tar.gz\` | ARM servers and SBCs |
+          | **Linux ARM64 (Neoverse)** | \`floo-aarch64-linux-gnu-neoverse-n1.tar.gz\` | AWS Graviton / Ampere |
+          | **Linux ARM64 (Raspberry Pi 4/5)** | \`floo-aarch64-linux-gnu-rpi4.tar.gz\` | Pi 4/5 tuned |
+          | **macOS Apple Silicon** | \`floo-aarch64-macos-m1.tar.gz\` | M-series Macs |
+          | **macOS Intel** | \`floo-x86_64-macos.tar.gz\` | Legacy Intel Macs |
+          | **macOS Intel (Haswell+)** | \`floo-x86_64-macos-haswell.tar.gz\` | Best perf on 2013+ Macs |
+          | **Windows x86_64** | \`floo-x86_64-windows-msvc.zip\` | Windows 10/11 x86_64 |
+          | **Windows ARM64** | \`floo-aarch64-windows-msvc.zip\` | Surface Pro X / Dev Kit |
 
           ### ⚠️ Note
 
@@ -126,6 +141,6 @@ jobs:
           **Built from:** ${{ github.repository }}@${{ github.sha }}
           " \
             --prerelease \
-            release-assets/*.tar.gz
+            release-assets/*
         env:
           GH_TOKEN: ${{ github.token }}

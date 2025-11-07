@@ -22,45 +22,30 @@ cd "$TEMP_DIR"
 echo "Downloading release artifacts for $VERSION..."
 echo ""
 
-# Homebrew artifacts
-echo "=== Homebrew (macOS) ==="
-wget -q "${BASE_URL}/floo-aarch64-macos-m1.tar.gz"
-wget -q "${BASE_URL}/floo-x86_64-macos-haswell.tar.gz"
+ARTIFACTS=(
+    floo-x86_64-linux-gnu.tar.gz
+    floo-x86_64-linux-gnu-haswell.tar.gz
+    floo-x86_64-linux-musl.tar.gz
+    floo-aarch64-linux-gnu.tar.gz
+    floo-aarch64-linux-gnu-neoverse-n1.tar.gz
+    floo-aarch64-linux-gnu-rpi4.tar.gz
+    floo-x86_64-macos.tar.gz
+    floo-x86_64-macos-haswell.tar.gz
+    floo-aarch64-macos-m1.tar.gz
+    floo-x86_64-windows-msvc.zip
+    floo-aarch64-windows-msvc.zip
+)
 
-echo "ARM64 (Apple Silicon M1+):"
-if command -v shasum &> /dev/null; then
-    shasum -a 256 floo-aarch64-macos-m1.tar.gz
-else
-    sha256sum floo-aarch64-macos-m1.tar.gz
-fi
-
-echo ""
-echo "x86_64 (Intel Haswell+):"
-if command -v shasum &> /dev/null; then
-    shasum -a 256 floo-x86_64-macos-haswell.tar.gz
-else
-    sha256sum floo-x86_64-macos-haswell.tar.gz
-fi
-
-echo ""
-echo "=== AUR (Linux) ==="
-wget -q "${BASE_URL}/floo-x86_64-linux-gnu-haswell.tar.gz"
-wget -q "${BASE_URL}/floo-aarch64-linux-gnu.tar.gz"
-
-echo "x86_64 (Haswell+):"
-if command -v shasum &> /dev/null; then
-    shasum -a 256 floo-x86_64-linux-gnu-haswell.tar.gz
-else
-    sha256sum floo-x86_64-linux-gnu-haswell.tar.gz
-fi
-
-echo ""
-echo "aarch64:"
-if command -v shasum &> /dev/null; then
-    shasum -a 256 floo-aarch64-linux-gnu.tar.gz
-else
-    sha256sum floo-aarch64-linux-gnu.tar.gz
-fi
+for artifact in "${ARTIFACTS[@]}"; do
+    echo "==> ${artifact}"
+    wget -q "${BASE_URL}/${artifact}"
+    if command -v shasum &> /dev/null; then
+        shasum -a 256 "${artifact}"
+    else
+        sha256sum "${artifact}"
+    fi
+    echo ""
+done
 
 # Cleanup
 cd -

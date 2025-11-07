@@ -1,6 +1,35 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+fn configureCpuModel(target_label: []const u8, query: *std.Target.Query, cpu_name_raw: []const u8) void {
+    const cpu_name = std.mem.trim(u8, cpu_name_raw, " \t\r\n");
+    if (cpu_name.len == 0) return;
+
+    if (std.mem.eql(u8, cpu_name, "native")) {
+        query.cpu_model = .native;
+        return;
+    }
+    if (std.mem.eql(u8, cpu_name, "baseline")) {
+        query.cpu_model = .baseline;
+        return;
+    }
+
+    const arch = query.cpu_arch orelse builtin.target.cpu.arch;
+    const parsed = std.Target.Cpu.Arch.parseCpuModel(arch, cpu_name) catch |err| switch (err) {
+        error.UnknownCpuModel => null,
+    };
+
+    if (parsed) |model| {
+        query.cpu_model = .{ .explicit = model };
+    } else {
+        std.debug.print(
+            "Warning: CPU model '{s}' not valid for target {s}; using baseline\n",
+            .{ cpu_name, target_label },
+        );
+        query.cpu_model = .baseline;
+    }
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -120,6 +149,7 @@ pub fn build(b: *std.Build) void {
     const ReleaseTarget = struct {
         name: []const u8,
         query: std.Target.Query,
+        cpu: ?[]const u8 = null,
     };
 
     const release_cpu_option = b.option([]const u8, "release_cpu", "Override CPU model for release-all targets (e.g. haswell, znver3, baseline, native)");
@@ -130,18 +160,52 @@ pub fn build(b: *std.Build) void {
             .os_tag = .linux,
             .abi = .gnu,
         } },
+        .{ .name = "x86_64-linux-gnu-haswell", .query = .{
+            .cpu_arch = .x86_64,
+            .os_tag = .linux,
+            .abi = .gnu,
+        }, .cpu = "haswell" },
+        .{ .name = "x86_64-linux-musl", .query = .{
+            .cpu_arch = .x86_64,
+            .os_tag = .linux,
+            .abi = .musl,
+        } },
         .{ .name = "aarch64-linux-gnu", .query = .{
             .cpu_arch = .aarch64,
             .os_tag = .linux,
             .abi = .gnu,
         } },
+        .{ .name = "aarch64-linux-gnu-neoverse-n1", .query = .{
+            .cpu_arch = .aarch64,
+            .os_tag = .linux,
+            .abi = .gnu,
+        }, .cpu = "neoverse_n1" },
+        .{ .name = "aarch64-linux-gnu-rpi4", .query = .{
+            .cpu_arch = .aarch64,
+            .os_tag = .linux,
+            .abi = .gnu,
+        }, .cpu = "cortex_a72" },
         .{ .name = "x86_64-macos", .query = .{
             .cpu_arch = .x86_64,
             .os_tag = .macos,
         } },
-        .{ .name = "aarch64-macos", .query = .{
+        .{ .name = "x86_64-macos-haswell", .query = .{
+            .cpu_arch = .x86_64,
+            .os_tag = .macos,
+        }, .cpu = "haswell" },
+        .{ .name = "aarch64-macos-m1", .query = .{
             .cpu_arch = .aarch64,
             .os_tag = .macos,
+        }, .cpu = "apple_m1" },
+        .{ .name = "x86_64-windows-msvc", .query = .{
+            .cpu_arch = .x86_64,
+            .os_tag = .windows,
+            .abi = .msvc,
+        } },
+        .{ .name = "aarch64-windows-msvc", .query = .{
+            .cpu_arch = .aarch64,
+            .os_tag = .windows,
+            .abi = .msvc,
         } },
     };
 
@@ -151,28 +215,9 @@ pub fn build(b: *std.Build) void {
         var target_query = cfg.query;
 
         if (release_cpu_option) |cpu_name_raw| {
-            const cpu_name = std.mem.trim(u8, cpu_name_raw, " \t\r\n");
-            if (cpu_name.len != 0) {
-                if (std.mem.eql(u8, cpu_name, "native")) {
-                    target_query.cpu_model = .native;
-                } else if (std.mem.eql(u8, cpu_name, "baseline")) {
-                    target_query.cpu_model = .baseline;
-                } else {
-                    const arch = target_query.cpu_arch orelse builtin.target.cpu.arch;
-                    const parsed = std.Target.Cpu.Arch.parseCpuModel(arch, cpu_name) catch |err| switch (err) {
-                        error.UnknownCpuModel => null,
-                    };
-                    if (parsed) |model| {
-                        target_query.cpu_model = .{ .explicit = model };
-                    } else {
-                        std.debug.print(
-                            "Warning: CPU model '{s}' not valid for target {s}; using baseline\n",
-                            .{ cpu_name, cfg.name },
-                        );
-                        target_query.cpu_model = .baseline;
-                    }
-                }
-            }
+            configureCpuModel(cfg.name, &target_query, cpu_name_raw);
+        } else if (cfg.cpu) |cpu_name| {
+            configureCpuModel(cfg.name, &target_query, cpu_name);
         }
 
         const resolved_target = b.resolveTargetQuery(target_query);

@@ -38,6 +38,57 @@ public server (reverse mode) with Noise XX + PSK authentication.
 See `examples/` for end-to-end scenarios (media servers, databases, proxies,
 load balancing, etc.).
 
+## Prebuilt binaries
+
+Every tagged release (and the nightly build) publishes architecture-specific
+artifacts with the exact names below:
+
+| Platform | File | Notes |
+|----------|------|-------|
+| Linux x86_64 (glibc) | `floo-x86_64-linux-gnu.tar.gz` | Compatible with all mainstream x86_64 distros |
+| Linux x86_64 (Haswell+) | `floo-x86_64-linux-gnu-haswell.tar.gz` | Enables AES-NI/BMI2 for 3-5× faster crypto |
+| Linux x86_64 (musl/static) | `floo-x86_64-linux-musl.tar.gz` | Fully static for Alpine or scratch containers |
+| Linux ARM64 (generic) | `floo-aarch64-linux-gnu.tar.gz` | Works on jetsons, SBCs, and cloud ARM |
+| Linux ARM64 (Neoverse) | `floo-aarch64-linux-gnu-neoverse-n1.tar.gz` | Tuned for AWS Graviton / Ampere Altra |
+| Linux ARM64 (Raspberry Pi 4/5) | `floo-aarch64-linux-gnu-rpi4.tar.gz` | Targets Cortex-A72 with ARMv8 crypto |
+| macOS Apple Silicon | `floo-aarch64-macos-m1.tar.gz` | M1/M2/M3/M4 with NEON + AES |
+| macOS Intel (generic) | `floo-x86_64-macos.tar.gz` | Works on any supported Intel Mac |
+| macOS Intel (Haswell+) | `floo-x86_64-macos-haswell.tar.gz` | Best performance on 2013+ Macs |
+| Windows x86_64 | `floo-x86_64-windows-msvc.zip` | Includes `flooc.exe` + `floos.exe` |
+| Windows ARM64 | `floo-aarch64-windows-msvc.zip` | Surface Pro X / ARM dev kits |
+
+Each archive contains both executables, the README, and the templated config
+files (`flooc.toml.example`, `floos.toml.example`).
+
+## Building & cross-compiling
+
+Local debug build:
+
+```bash
+zig build
+```
+
+Single-target release build (e.g. Windows ARM64):
+
+```bash
+zig build -Doptimize=ReleaseFast -Dtarget=aarch64-windows-msvc
+```
+
+Hardware-tuned build (e.g. x86_64 Haswell):
+
+```bash
+zig build -Doptimize=ReleaseFast -Dtarget=x86_64-linux-gnu -Dcpu=haswell
+```
+
+Complete release matrix (same set GitHub Actions publishes):
+
+```bash
+zig build release-all
+```
+
+Use `-Drelease_cpu=native` or `-Drelease_cpu=baseline` to override all targets
+at once. The release step emits binaries under `zig-out/release/<target-name>/`.
+
 ## Configuration model
 
 Both `flooc` and `floos` share the same TOML structure:
@@ -125,7 +176,6 @@ changing protocol logic.
 
 ## Roadmap
 
-- Windows support
 - Compression for high-latency links
 - io_uring backend (Linux)
 - QUIC/DTLS transport for UDP

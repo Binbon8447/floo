@@ -46,126 +46,71 @@ jobs:
         with:
           version: 0.15.1
 
-      - name: Build all platforms (baseline)
-        run: zig build release-all -Drelease_cpu=baseline
-
-      - name: Build optimized x86_64 variants (Haswell)
+      - name: Build all platforms
         run: |
-          # Save baseline x86_64 builds first
-          mkdir -p zig-out/release-baseline
-          cp -r zig-out/release/x86_64-linux-gnu zig-out/release-baseline/
-          cp -r zig-out/release/x86_64-macos zig-out/release-baseline/
+          zig build release-all
 
-          # Build Haswell-optimized (enables AES-NI for both Linux and macOS x86_64)
-          zig build release-all -Drelease_cpu=haswell
-
-          # Rename Haswell builds
-          mv zig-out/release/x86_64-linux-gnu zig-out/release/x86_64-linux-gnu-haswell
-          mv zig-out/release/x86_64-macos zig-out/release/x86_64-macos-haswell
-
-          # Restore baseline builds
-          mv zig-out/release-baseline/x86_64-linux-gnu zig-out/release/
-          mv zig-out/release-baseline/x86_64-macos zig-out/release/
-
-      - name: Build optimized Apple Silicon (M1+)
-        run: |
-          # Save baseline aarch64-macos first
-          mkdir -p zig-out/release-baseline
-          cp -r zig-out/release/aarch64-macos zig-out/release-baseline/
-
-          # Build Apple M1-optimized (enables ARM crypto extensions)
-          zig build release-all -Drelease_cpu=apple_m1
-
-          # Rename Apple Silicon optimized build
-          mv zig-out/release/aarch64-macos zig-out/release/aarch64-macos-m1
-
-          # Restore baseline build
-          mv zig-out/release-baseline/aarch64-macos zig-out/release/
-
-      - name: Build Raspberry Pi variant (Cortex-A76)
-        run: |
-          # Save baseline aarch64-linux-gnu first
-          mkdir -p zig-out/release-baseline
-          cp -r zig-out/release/aarch64-linux-gnu zig-out/release-baseline/
-
-          # Build Cortex-A76 optimized (Raspberry Pi 5)
-          zig build release-all -Drelease_cpu=cortex_a76
-
-          # Rename Raspberry Pi build
-          mv zig-out/release/aarch64-linux-gnu zig-out/release/aarch64-linux-gnu-rpi
-
-          # Restore baseline build
-          mv zig-out/release-baseline/aarch64-linux-gnu zig-out/release/
+          echo "Built binaries:"
+          find zig-out/release -maxdepth 2 -type f \( -name "flooc*" -o -name "floos*" \) | sort
 
       - name: Package artifacts
+        env:
+          RELEASE_TARGETS: |
+            x86_64-linux-gnu
+            x86_64-linux-gnu-haswell
+            x86_64-linux-musl
+            aarch64-linux-gnu
+            aarch64-linux-gnu-neoverse-n1
+            aarch64-linux-gnu-rpi4
+            x86_64-macos
+            x86_64-macos-haswell
+            aarch64-macos-m1
+            x86_64-windows-msvc
+            aarch64-windows-msvc
         run: |
+          set -euo pipefail
           mkdir -p artifacts
 
-          # Package each target (baseline + optimized variants)
-          for target in x86_64-linux-gnu x86_64-linux-gnu-haswell aarch64-linux-gnu aarch64-linux-gnu-rpi x86_64-macos x86_64-macos-haswell aarch64-macos aarch64-macos-m1; do
-            if [ -d "zig-out/release/$target" ]; then
-              mkdir -p "artifacts/$target"
-              cp zig-out/release/$target/flooc "artifacts/$target/"
-              cp zig-out/release/$target/floos "artifacts/$target/"
-              cp README.md flooc.toml.example floos.toml.example "artifacts/$target/"
+          for target in $RELEASE_TARGETS; do
+            src="zig-out/release/${target}"
+            if [ ! -d "$src" ]; then
+              echo "Warning: target ${target} missing, skipping"
+              continue
+            fi
 
-              cd artifacts
-              tar czf "floo-$target.tar.gz" "$target/"
-              cd ..
+            out_dir="artifacts/${target}"
+            mkdir -p "$out_dir"
+
+            for bin in flooc floos; do
+              if [ -f "$src/${bin}.exe" ]; then
+                cp "$src/${bin}.exe" "$out_dir/${bin}.exe"
+              elif [ -f "$src/${bin}" ]; then
+                cp "$src/${bin}" "$out_dir/${bin}"
+              else
+                echo "Warning: $bin not found for ${target}"
+              fi
+            done
+
+            cp README.md "$out_dir/"
+            cp configs/flooc.example.toml "$out_dir/flooc.toml.example"
+            cp configs/floos.example.toml "$out_dir/floos.toml.example"
+            cp CHANGELOG.md "$out_dir/" 2>/dev/null || true
+
+            if [[ "$target" == *"windows"* ]]; then
+              (cd artifacts && zip -rq "floo-${target}.zip" "${target}")
+            else
+              (cd artifacts && tar czf "floo-${target}.tar.gz" "${target}")
             fi
           done
 
-      - name: Upload Linux x86_64
-        uses: actions/upload-artifact@v4
-        with:
-          name: floo-linux-x86_64
-          path: artifacts/floo-x86_64-linux-gnu.tar.gz
+          echo "Created release payloads:"
+          ls -lh artifacts
 
-      - name: Upload Linux x86_64 (Haswell)
+      - name: Upload release packages
         uses: actions/upload-artifact@v4
         with:
-          name: floo-linux-x86_64-haswell
-          path: artifacts/floo-x86_64-linux-gnu-haswell.tar.gz
-        if: hashFiles('artifacts/floo-x86_64-linux-gnu-haswell.tar.gz') != ''
-
-      - name: Upload Linux aarch64
-        uses: actions/upload-artifact@v4
-        with:
-          name: floo-linux-aarch64
-          path: artifacts/floo-aarch64-linux-gnu.tar.gz
-
-      - name: Upload Linux aarch64 (Raspberry Pi)
-        uses: actions/upload-artifact@v4
-        with:
-          name: floo-linux-aarch64-rpi
-          path: artifacts/floo-aarch64-linux-gnu-rpi.tar.gz
-        if: hashFiles('artifacts/floo-aarch64-linux-gnu-rpi.tar.gz') != ''
-
-      - name: Upload macOS x86_64
-        uses: actions/upload-artifact@v4
-        with:
-          name: floo-macos-x86_64
-          path: artifacts/floo-x86_64-macos.tar.gz
-
-      - name: Upload macOS x86_64 (Haswell)
-        uses: actions/upload-artifact@v4
-        with:
-          name: floo-macos-x86_64-haswell
-          path: artifacts/floo-x86_64-macos-haswell.tar.gz
-        if: hashFiles('artifacts/floo-x86_64-macos-haswell.tar.gz') != ''
-
-      - name: Upload macOS aarch64
-        uses: actions/upload-artifact@v4
-        with:
-          name: floo-macos-aarch64
-          path: artifacts/floo-aarch64-macos.tar.gz
-
-      - name: Upload macOS aarch64 (M1+)
-        uses: actions/upload-artifact@v4
-        with:
-          name: floo-macos-aarch64-m1
-          path: artifacts/floo-aarch64-macos-m1.tar.gz
-        if: hashFiles('artifacts/floo-aarch64-macos-m1.tar.gz') != ''
+          name: release-packages
+          path: artifacts
 
   release:
     name: Create GitHub Release
@@ -208,7 +153,7 @@ jobs:
       - name: Prepare release assets
         run: |
           mkdir -p release-assets
-          find release-artifacts -name "*.tar.gz" -exec cp {} release-assets/ \;
+          find release-artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec cp {} release-assets/ \;
           ls -lh release-assets/
 
       - name: Create Release
@@ -249,14 +194,17 @@ jobs:
 
             | Platform | Download | CPU Optimization |
             |----------|----------|------------------|
-            | **Linux x86_64** | `floo-x86_64-linux-gnu.tar.gz` | Baseline (compatible with all CPUs) |
-            | **Linux x86_64 (Haswell+)** ⚡ | `floo-x86_64-linux-gnu-haswell.tar.gz` | Optimized for Intel Haswell+ (2013+) with AES-NI |
-            | **Linux aarch64** | `floo-aarch64-linux-gnu.tar.gz` | ARM64 servers (baseline) |
-            | **Linux aarch64 (Raspberry Pi)** 🥧 | `floo-aarch64-linux-gnu-rpi.tar.gz` | Raspberry Pi 4/5 (Cortex-A76) |
-            | **macOS Intel** | `floo-x86_64-macos.tar.gz` | Intel Macs (baseline) |
-            | **macOS Intel (Haswell+)** ⚡ | `floo-x86_64-macos-haswell.tar.gz` | Intel Macs (2013+) with AES-NI |
-            | **macOS Apple Silicon** | `floo-aarch64-macos.tar.gz` | M1/M2/M3/M4 (baseline) |
-            | **macOS Apple Silicon (M1+)** ⚡ | `floo-aarch64-macos-m1.tar.gz` | M1/M2/M3/M4 with ARM crypto extensions |
+            | **Linux x86_64 (glibc)** | `floo-x86_64-linux-gnu.tar.gz` | Generic compatibility |
+            | **Linux x86_64 (Haswell+)** ⚡ | `floo-x86_64-linux-gnu-haswell.tar.gz` | AES-NI/BMI2 tuned |
+            | **Linux x86_64 (static)** | `floo-x86_64-linux-musl.tar.gz` | Works on Alpine / scratch containers |
+            | **Linux ARM64 (generic)** | `floo-aarch64-linux-gnu.tar.gz` | ARM servers, Jetson |
+            | **Linux ARM64 (Neoverse)** ⚡ | `floo-aarch64-linux-gnu-neoverse-n1.tar.gz` | Graviton / Ampere instances |
+            | **Linux ARM64 (Raspberry Pi 4/5)** 🥧 | `floo-aarch64-linux-gnu-rpi4.tar.gz` | Tuned for Cortex-A72 |
+            | **macOS Intel** | `floo-x86_64-macos.tar.gz` | macOS 11+ universal baseline |
+            | **macOS Intel (Haswell+)** ⚡ | `floo-x86_64-macos-haswell.tar.gz` | Best perf on 2013+ Macs |
+            | **macOS Apple Silicon** | `floo-aarch64-macos-m1.tar.gz` | M1/M2/M3/M4 with ARMv8 crypto |
+            | **Windows x86_64** | `floo-x86_64-windows-msvc.zip` | Contains `flooc.exe` / `floos.exe` |
+            | **Windows ARM64** | `floo-aarch64-windows-msvc.zip` | Surface Pro X / ARM dev kits |
 
             ⚡ **Recommended:** Optimized builds provide significantly better crypto performance (3-5x faster encryption).
 
@@ -264,7 +212,7 @@ jobs:
 
             **Extract and use:**
             ```bash
-            tar xzf floo-*.tar.gz
+            tar xzf floo-*.tar.gz   # or unzip floo-*.zip on Windows
             cd floo-*/
             ./flooc --version
             ./floos --version
