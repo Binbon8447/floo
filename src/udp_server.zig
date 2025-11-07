@@ -13,7 +13,7 @@ pub const UdpForwarder = struct {
     tunnel_conn: *anyopaque,
     send_fn: *const fn (conn: *anyopaque, payload: []const u8) anyerror!void,
     running: std.atomic.Value(bool),
-    timeout_ns: i128,
+    timeout_ns: i64,
     sessions: std.AutoHashMap(tunnel.StreamId, *Session),
     sessions_mutex: std.Thread.Mutex,
 
@@ -35,7 +35,7 @@ pub const UdpForwarder = struct {
             .tunnel_conn = tunnel_conn,
             .send_fn = send_fn,
             .running = std.atomic.Value(bool).init(true),
-            .timeout_ns = @as(i128, timeout_seconds) * std.time.ns_per_s,
+            .timeout_ns = @as(i64, @intCast(timeout_seconds * std.time.ns_per_s)),
             .sessions = std.AutoHashMap(tunnel.StreamId, *Session).init(allocator),
             .sessions_mutex = .{},
         };
@@ -47,7 +47,7 @@ pub const UdpForwarder = struct {
             return error.InvalidSourceAddress;
         }
 
-        const now = std.time.nanoTimestamp();
+        const now = @as(i64, @intCast(std.time.nanoTimestamp()));
         self.pruneExpiredSessions(now);
 
         const session = try self.ensureSession(udp_msg.stream_id, udp_msg.source_addr, udp_msg.source_port, now);
@@ -88,7 +88,7 @@ pub const UdpForwarder = struct {
         thread: std.Thread,
         running: std.atomic.Value(bool),
         forwarder: *UdpForwarder,
-        last_activity_ns: std.atomic.Value(i128),
+        last_activity_ns: std.atomic.Value(i64),
         source_addr: [16]u8,
         source_addr_len: u8,
         source_port: u16,
@@ -99,7 +99,7 @@ pub const UdpForwarder = struct {
         stream_id: tunnel.StreamId,
         source_addr: []const u8,
         source_port: u16,
-        now: i128,
+        now: i64,
     ) !*Session {
         self.sessions_mutex.lock();
         if (self.sessions.get(stream_id)) |session| {
@@ -125,7 +125,7 @@ pub const UdpForwarder = struct {
             .thread = undefined,
             .running = std.atomic.Value(bool).init(true),
             .forwarder = self,
-            .last_activity_ns = std.atomic.Value(i128).init(now),
+            .last_activity_ns = std.atomic.Value(i64).init(now),
             .source_addr = [_]u8{0} ** 16,
             .source_addr_len = @intCast(source_addr.len),
             .source_port = source_port,
@@ -166,7 +166,7 @@ pub const UdpForwarder = struct {
             };
             if (n <= 0) continue;
 
-            session.last_activity_ns.store(std.time.nanoTimestamp(), .release);
+            session.last_activity_ns.store(@as(i64, @intCast(std.time.nanoTimestamp())), .release);
 
             var encode_buf: [70000]u8 = undefined;
             const udp_msg = tunnel.UdpDataMsg{
@@ -189,7 +189,7 @@ pub const UdpForwarder = struct {
         forwarder.removeSession(session.stream_id, true);
     }
 
-    fn pruneExpiredSessions(self: *UdpForwarder, now: i128) void {
+    fn pruneExpiredSessions(self: *UdpForwarder, now: i64) void {
         if (self.timeout_ns == 0) return;
 
         // Workaround for Zig compiler bug in Debug mode on some platforms
