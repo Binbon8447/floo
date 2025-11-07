@@ -39,8 +39,6 @@ jobs:
             x86_64-macos
             x86_64-macos-haswell
             aarch64-macos-m1
-            x86_64-windows-msvc
-            aarch64-windows-msvc
         run: |
           set -euo pipefail
           mkdir -p release-assets
@@ -119,8 +117,6 @@ jobs:
           | **macOS Apple Silicon** | \`floo-aarch64-macos-m1.tar.gz\` | M-series Macs |
           | **macOS Intel** | \`floo-x86_64-macos.tar.gz\` | Legacy Intel Macs |
           | **macOS Intel (Haswell+)** | \`floo-x86_64-macos-haswell.tar.gz\` | Best perf on 2013+ Macs |
-          | **Windows x86_64** | \`floo-x86_64-windows-msvc.zip\` | Windows 10/11 x86_64 |
-          | **Windows ARM64** | \`floo-aarch64-windows-msvc.zip\` | Surface Pro X / Dev Kit |
 
           ### ⚠️ Note
 

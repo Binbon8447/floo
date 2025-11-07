@@ -197,16 +197,6 @@ pub fn build(b: *std.Build) void {
             .cpu_arch = .aarch64,
             .os_tag = .macos,
         }, .cpu = "apple_m1" },
-        .{ .name = "x86_64-windows-msvc", .query = .{
-            .cpu_arch = .x86_64,
-            .os_tag = .windows,
-            .abi = .msvc,
-        } },
-        .{ .name = "aarch64-windows-msvc", .query = .{
-            .cpu_arch = .aarch64,
-            .os_tag = .windows,
-            .abi = .msvc,
-        } },
     };
 
     const release_step = b.step("release-all", "Build release binaries for common platforms");

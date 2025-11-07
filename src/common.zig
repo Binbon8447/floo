@@ -1,6 +1,14 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const posix = std.posix;
 const config = @import("config.zig");
+
+inline fn socketHandle(fd: posix.fd_t) posix.socket_t {
+    if (builtin.target.os.tag == .windows) {
+        return @ptrCast(fd);
+    }
+    return fd;
+}
 
 // ============================================================================
 // Network Configuration Constants
@@ -160,9 +168,10 @@ pub fn tuneSocketBuffers(fd: posix.fd_t, buffer_size: u32) void {
 ///
 /// Extracted from client.zig and server.zig to eliminate duplication.
 pub fn sendAllToFd(fd: posix.fd_t, data: []const u8) !void {
+    const socket_fd = socketHandle(fd);
     var offset: usize = 0;
     while (offset < data.len) {
-        const n = posix.send(fd, data[offset..], 0) catch |err| switch (err) {
+        const n = posix.send(socket_fd, data[offset..], 0) catch |err| switch (err) {
             error.WouldBlock => continue,
             else => return err,
         };
@@ -250,9 +259,10 @@ pub fn resolveHostPort(host: []const u8, port: u16) !std.net.Address {
 
 /// Receive an exact number of bytes from a socket file descriptor.
 pub fn recvAllFromFd(fd: posix.fd_t, buffer: []u8) !void {
+    const socket_fd = socketHandle(fd);
     var offset: usize = 0;
     while (offset < buffer.len) {
-        const n = posix.recv(fd, buffer[offset..], 0) catch |err| switch (err) {
+        const n = posix.recv(socket_fd, buffer[offset..], 0) catch |err| switch (err) {
             error.WouldBlock => continue,
             else => return err,
         };

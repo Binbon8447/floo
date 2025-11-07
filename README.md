@@ -54,8 +54,6 @@ artifacts with the exact names below:
 | macOS Apple Silicon | `floo-aarch64-macos-m1.tar.gz` | M1/M2/M3/M4 with NEON + AES |
 | macOS Intel (generic) | `floo-x86_64-macos.tar.gz` | Works on any supported Intel Mac |
 | macOS Intel (Haswell+) | `floo-x86_64-macos-haswell.tar.gz` | Best performance on 2013+ Macs |
-| Windows x86_64 | `floo-x86_64-windows-msvc.zip` | Includes `flooc.exe` + `floos.exe` |
-| Windows ARM64 | `floo-aarch64-windows-msvc.zip` | Surface Pro X / ARM dev kits |
 
 Each archive contains both executables, the README, and the templated config
 files (`flooc.toml.example`, `floos.toml.example`).

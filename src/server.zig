@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const posix = std.posix;
 const build_options = @import("build_options");
 const protocol = @import("protocol.zig");
@@ -1336,7 +1337,7 @@ pub fn main() !void {
     std.debug.print("[CONFIG] Hot Reload: Disabled (restart floos to apply configuration changes)\n\n", .{});
 
     // Register signal handlers (POSIX only)
-    if (@hasDecl(posix, "Sigaction") and @hasDecl(posix, "sigaction")) {
+    if (builtin.target.os.tag != .windows and @hasDecl(posix, "Sigaction") and @hasDecl(posix, "sigaction")) {
         const sig_action = posix.Sigaction{
             .handler = .{ .handler = handleSignal },
             .mask = std.mem.zeroes(posix.sigset_t),

@@ -32,8 +32,6 @@ ARTIFACTS=(
     floo-x86_64-macos.tar.gz
     floo-x86_64-macos-haswell.tar.gz
     floo-aarch64-macos-m1.tar.gz
-    floo-x86_64-windows-msvc.zip
-    floo-aarch64-windows-msvc.zip
 )
 
 for artifact in "${ARTIFACTS[@]}"; do

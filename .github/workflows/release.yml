@@ -65,8 +65,6 @@ jobs:
             x86_64-macos
             x86_64-macos-haswell
             aarch64-macos-m1
-            x86_64-windows-msvc
-            aarch64-windows-msvc
         run: |
           set -euo pipefail
           mkdir -p artifacts
@@ -203,8 +201,6 @@ jobs:
             | **macOS Intel** | `floo-x86_64-macos.tar.gz` | macOS 11+ universal baseline |
             | **macOS Intel (Haswell+)** ⚡ | `floo-x86_64-macos-haswell.tar.gz` | Best perf on 2013+ Macs |
             | **macOS Apple Silicon** | `floo-aarch64-macos-m1.tar.gz` | M1/M2/M3/M4 with ARMv8 crypto |
-            | **Windows x86_64** | `floo-x86_64-windows-msvc.zip` | Contains `flooc.exe` / `floos.exe` |
-            | **Windows ARM64** | `floo-aarch64-windows-msvc.zip` | Surface Pro X / ARM dev kits |
 
             ⚡ **Recommended:** Optimized builds provide significantly better crypto performance (3-5x faster encryption).
 
