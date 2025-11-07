@@ -1,0 +1,60 @@
+# Floo Client Configuration (flooc.toml)
+# ======================================
+# This template is split into three sections:
+#   1. Core tunnel settings
+#   2. Services you want to reach (forward) or expose (reverse)
+#   3. Optional advanced tuning knobs
+
+# -----------------------------------------------------------------------------
+# 1. Core tunnel settings
+# -----------------------------------------------------------------------------
+server = "tunnel.example.com:8443"    # floos public address and port
+cipher = "aes256gcm"                   # Supported: chacha20poly1305, aes256gcm, aes128gcm, aegis128l, aegis256, none
+psk = "replace-with-strong-psk"        # Must match floos
+token = "replace-with-client-token"    # Default token for services without their own token
+# default_service = "web"              # Optional: auto-select this service when only one listener is needed
+
+# -----------------------------------------------------------------------------
+# 2. Services
+# -----------------------------------------------------------------------------
+
+# Forward mode: listen locally and connect to remote targets through the tunnel.
+# Format: name = "listen_host:listen_port[/transport]" (transport defaults to tcp)
+[services]
+web = "127.0.0.1:8080"                 # Visit http://localhost:8080 to reach remote web service
+ssh = "127.0.0.1:2222"                 # ssh -p 2222 localhost → remote SSH
+ssh.token = "ssh-session-token"        # Require explicit token when requesting SSH tunnel
+# dns = "127.0.0.1:5300/udp"          # Local UDP listener → remote DNS over tunnel
+
+# Reverse mode: expose local services to the floos server.
+# Format: name = "local_host:local_port[/transport]"
+[reverse_services]
+media = "127.0.0.1:8096"               # Share Jellyfin/Emby from home network
+metrics = "127.0.0.1:9000"             # Expose Prometheus exporter
+metrics.token = "metrics-only-token"
+# udp_cam = "127.0.0.1:5000/udp"       # Send local UDP stream through the tunnel
+
+# -----------------------------------------------------------------------------
+# 3. Advanced tuning (all optional)
+# -----------------------------------------------------------------------------
+[advanced]
+num_tunnels = 2                         # Parallel TCP tunnels per client (1-16)
+udp_timeout_seconds = 60                # Tear down idle UDP flows
+socket_buffer_size = 524288             # Per-socket buffer (bytes); raise for high bitrates
+
+# TCP keepalive / latency controls
+tcp_nodelay = true
+tcp_keepalive = true
+tcp_keepalive_idle = 45
+tcp_keepalive_interval = 10
+tcp_keepalive_count = 3
+
+# Heartbeats & reconnection policy
+heartbeat_timeout_seconds = 60
+reconnect_enabled = true
+reconnect_initial_delay_ms = 1000
+reconnect_max_delay_ms = 30000
+reconnect_backoff_multiplier = 2
+
+# Optional outbound proxy (socks5:// or http://)
+proxy_url = ""

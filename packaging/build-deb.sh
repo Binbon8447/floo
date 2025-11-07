@@ -74,7 +74,7 @@ Description: Secure, high-performance tunneling in Zig
   - Zero runtime dependencies
   - Reverse and forward tunneling modes
   - SOCKS5 and HTTP CONNECT proxy support
-  - Hot config reload with SIGHUP
+  - Config changes applied on restart (SIGHUP reload temporarily disabled)
   - Built-in diagnostics (--doctor, --ping)
 EOF
 
@@ -134,7 +134,7 @@ Description: Secure, high-performance tunneling in Zig
   - Zero runtime dependencies
   - Reverse and forward tunneling modes
   - SOCKS5 and HTTP CONNECT proxy support
-  - Hot config reload with SIGHUP
+  - Config changes applied on restart (SIGHUP reload temporarily disabled)
   - Built-in diagnostics (--doctor, --ping)
 EOF
 

@@ -1,11 +1,92 @@
 const std = @import("std");
 const posix = std.posix;
+const config = @import("config.zig");
+
+// ============================================================================
+// Network Configuration Constants
+// ============================================================================
+
+/// Maximum number of pending connections in listen queue.
+/// This controls how many connections can wait before accept() is called.
+/// Linux default is 128, which works well for most use cases.
+pub const LISTEN_BACKLOG: u32 = 128;
+
+/// Standard buffer size for socket I/O operations (64KB).
+/// Optimal for most network conditions, matches typical TCP window size.
+pub const SOCKET_BUFFER_SIZE: usize = 64 * 1024;
+
+/// Large buffer for high-throughput operations (256KB).
+/// Used for frame decoding and encryption buffers.
+pub const LARGE_BUFFER_SIZE: usize = 256 * 1024;
+
+// ============================================================================
+// Thread Stack Sizes
+// ============================================================================
+
+/// Default stack size for connection handler threads (256KB).
+/// Provides enough space for buffers and call stack.
+pub const DEFAULT_THREAD_STACK: usize = 256 * 1024;
+
+/// Stack size for tunnel receiver threads (512KB).
+/// Larger stack needed for MAX_FRAME_SIZE buffers and nested calls.
+pub const TUNNEL_THREAD_STACK: usize = 512 * 1024;
+
+// ============================================================================
+// Message Buffer Sizes
+// ============================================================================
+
+/// Control message buffer size (4KB).
+/// Pre-allocated buffer for encoding control messages (CONNECT, CLOSE, etc.).
+/// Large enough for any control message with reasonable token lengths.
+pub const CONTROL_MSG_BUFFER_SIZE: usize = 4096;
 
 /// Lightweight trace helper that compiles away when `enabled` is false.
 pub inline fn tracePrint(comptime enabled: bool, comptime fmt: []const u8, args: anytype) void {
     if (enabled) {
         std.debug.print(fmt, args);
     }
+}
+
+/// Constant-time comparison to prevent timing attacks.
+///
+/// This function compares two byte slices in constant time to prevent
+/// attackers from using timing measurements to determine the correct
+/// value byte-by-byte (timing side-channel attack).
+///
+/// Returns true if slices are equal, false otherwise.
+///
+/// Note: Length comparison is NOT constant-time, but that's unavoidable
+/// as we need to know if lengths match. The actual content comparison
+/// is constant-time.
+///
+/// Security: Use this for comparing authentication tokens, passwords,
+/// PSKs, HMAC tags, or any secret values.
+pub fn constantTimeEqual(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) {
+        // Length mismatch - still perform work to maintain constant time
+        // This prevents timing attacks based on early returns
+        var dummy: u8 = 0;
+        const min_len = @min(a.len, b.len);
+
+        // Do comparison work even though we know result is false
+        for (0..min_len) |i| {
+            dummy |= a[i % a.len] ^ b[i % b.len];
+        }
+
+        // Ensure compiler doesn't optimize away the dummy work
+        std.mem.doNotOptimizeAway(dummy);
+
+        return false;
+    }
+
+    // Constant-time comparison of equal-length slices
+    var result: u8 = 0;
+    for (a, b) |x, y| {
+        result |= x ^ y;
+    }
+
+    // result is 0 if all bytes match, non-zero otherwise
+    return result == 0;
 }
 
 pub const TcpOptions = struct {
@@ -16,32 +97,14 @@ pub const TcpOptions = struct {
     keepalive_count: u32,
 };
 
-/// Build a `TcpOptions` struct from any config that exposes the TCP tuning fields.
-pub fn tcpOptionsFromConfig(cfg_ptr: anytype) TcpOptions {
-    return switch (@typeInfo(@TypeOf(cfg_ptr))) {
-        .pointer => |pointer_info| blk: {
-            const child_type = pointer_info.child;
-            comptime for ([_][]const u8{
-                "tcp_nodelay",
-                "tcp_keepalive",
-                "tcp_keepalive_idle",
-                "tcp_keepalive_interval",
-                "tcp_keepalive_count",
-            }) |field_name| {
-                if (!@hasField(child_type, field_name)) {
-                    @compileError("Config type missing field: " ++ field_name);
-                }
-            };
-
-            break :blk TcpOptions{
-                .nodelay = cfg_ptr.*.tcp_nodelay,
-                .keepalive = cfg_ptr.*.tcp_keepalive,
-                .keepalive_idle = cfg_ptr.*.tcp_keepalive_idle,
-                .keepalive_interval = cfg_ptr.*.tcp_keepalive_interval,
-                .keepalive_count = cfg_ptr.*.tcp_keepalive_count,
-            };
-        },
-        else => @compileError("tcpOptionsFromConfig expects a pointer to a config struct"),
+/// Build a `TcpOptions` struct from tuning settings.
+pub fn tcpOptionsFromSettings(settings: *const config.TcpSettings) TcpOptions {
+    return TcpOptions{
+        .nodelay = settings.nodelay,
+        .keepalive = settings.keepalive,
+        .keepalive_idle = settings.keepalive_idle,
+        .keepalive_interval = settings.keepalive_interval,
+        .keepalive_count = settings.keepalive_count,
     };
 }
 
@@ -75,9 +138,6 @@ pub fn applyTcpOptions(fd: posix.fd_t, opts: TcpOptions) void {
     }
 }
 
-/// Default socket buffer size for high-throughput networking.
-pub const DEFAULT_SOCKET_BUFFER_BYTES: u32 = 4 * 1024 * 1024;
-
 /// Tune socket buffers for high throughput.
 pub fn tuneSocketBuffers(fd: posix.fd_t, buffer_size: u32) void {
     const size: c_int = @intCast(buffer_size);
@@ -88,4 +148,115 @@ pub fn tuneSocketBuffers(fd: posix.fd_t, buffer_size: u32) void {
     posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.SNDBUF, &bytes) catch |err| {
         std.debug.print("[SOCKET] Failed to grow SNDBUF to {}: {}\n", .{ buffer_size, err });
     };
+}
+
+/// Send all data to file descriptor, handling partial writes.
+///
+/// This function ensures all bytes are sent, handling the case where
+/// send() returns fewer bytes than requested (partial write).
+///
+/// Returns error.ConnectionClosed if the connection is closed before
+/// all data is sent (send returns 0).
+///
+/// Extracted from client.zig and server.zig to eliminate duplication.
+pub fn sendAllToFd(fd: posix.fd_t, data: []const u8) !void {
+    var offset: usize = 0;
+    while (offset < data.len) {
+        const n = posix.send(fd, data[offset..], 0) catch |err| switch (err) {
+            error.WouldBlock => continue,
+            else => return err,
+        };
+        if (n == 0) return error.ConnectionClosed;
+        offset += n;
+    }
+}
+
+/// Write length-prefixed frame using writev() for scatter-gather I/O.
+///
+/// Frame format: [4-byte big-endian length][payload]
+///
+/// This function uses writev() for atomic write of header and payload,
+/// minimizing system calls and ensuring both parts are sent together.
+///
+/// Handles partial writes by tracking which iovecs have been sent and
+/// updating offsets accordingly.
+///
+/// Extracted from client.zig and server.zig to eliminate duplication.
+pub fn writeFrameLocked(fd: posix.fd_t, payload: []const u8) !void {
+    var header: [4]u8 = undefined;
+    std.mem.writeInt(u32, header[0..4], @intCast(payload.len), .big);
+
+    // Track how much of each part has been sent
+    var header_sent: usize = 0;
+    var payload_sent: usize = 0;
+
+    while (header_sent < header.len or payload_sent < payload.len) {
+        // Prepare iovecs based on what still needs to be sent
+        var iovecs_buf: [2]posix.iovec_const = undefined;
+        var iovec_count: usize = 0;
+
+        if (header_sent < header.len) {
+            const header_remaining = header[header_sent..];
+            iovecs_buf[iovec_count] = posix.iovec_const{ .base = header_remaining.ptr, .len = header_remaining.len };
+            iovec_count += 1;
+        }
+
+        if (payload_sent < payload.len) {
+            const payload_remaining = payload[payload_sent..];
+            iovecs_buf[iovec_count] = posix.iovec_const{ .base = payload_remaining.ptr, .len = payload_remaining.len };
+            iovec_count += 1;
+        }
+
+        const iovecs = iovecs_buf[0..iovec_count];
+        const written = posix.writev(fd, iovecs) catch |err| switch (err) {
+            error.WouldBlock => continue,
+            else => return err,
+        };
+        if (written == 0) return error.ConnectionClosed;
+
+        // Update counters based on bytes written
+        var remaining = written;
+
+        // Process header first if not fully sent
+        if (header_sent < header.len) {
+            const header_bytes_to_send = header.len - header_sent;
+            if (remaining >= header_bytes_to_send) {
+                remaining -= header_bytes_to_send;
+                header_sent = header.len;
+            } else {
+                header_sent += remaining;
+                remaining = 0;
+            }
+        }
+
+        // Then process payload if we have remaining bytes
+        if (remaining > 0 and payload_sent < payload.len) {
+            payload_sent += @min(remaining, payload.len - payload_sent);
+        }
+    }
+}
+
+/// Format a std.net.Address into a temporary buffer for logging.
+pub fn formatAddress(addr: std.net.Address, buf: []u8) []const u8 {
+    return std.fmt.bufPrint(buf, "{f}", .{addr}) catch "unavailable";
+}
+
+/// Resolve IPv4/IPv6/DNS host strings into a std.net.Address.
+pub fn resolveHostPort(host: []const u8, port: u16) !std.net.Address {
+    return std.net.Address.parseIp4(host, port) catch
+        std.net.Address.parseIp6(host, port) catch
+        std.net.Address.resolveIp(host, port);
+}
+
+/// Receive an exact number of bytes from a socket file descriptor.
+pub fn recvAllFromFd(fd: posix.fd_t, buffer: []u8) !void {
+    var offset: usize = 0;
+    while (offset < buffer.len) {
+        const n = posix.recv(fd, buffer[offset..], 0) catch |err| switch (err) {
+            error.WouldBlock => continue,
+            else => return err,
+        };
+        if (n == 0) return error.ConnectionClosed;
+        offset += n;
+    }
 }

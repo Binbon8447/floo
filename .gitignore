@@ -27,3 +27,10 @@ Thumbs.db
 EMBY_*.md
 EMBY_*.txt
 QUICKSTART_EMBY.md
+
+# Test configurations
+test-*.toml
+
+# Build artifacts
+build-deb/
+.DS_Store

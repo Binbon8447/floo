@@ -1,17 +1,16 @@
-# Public server (VPS/Raspberry Pi)
 bind = "0.0.0.0"
 port = 8443
 cipher = "aes256gcm"
-psk = "your-secure-pre-shared-key"
-token = "your-auth-token"
+psk = "emby-reverse-forward-secret-2024"
+token = "emby-access-token"
 
 [reverse_services]
-webapp = "0.0.0.0:80"  # Visitors connect here; traffic is relayed over the tunnel
+emby = "0.0.0.0:8096"
 
 [advanced]
 tcp_nodelay = true
 tcp_keepalive = true
-tcp_keepalive_idle = 45
+tcp_keepalive_idle = 30
 tcp_keepalive_interval = 10
 tcp_keepalive_count = 3
 socket_buffer_size = 524288

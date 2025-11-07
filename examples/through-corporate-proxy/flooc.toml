@@ -1,0 +1,12 @@
+server = "your-vps-ip:8443"
+cipher = "aes256gcm"
+psk = "corp-proxy-psk"
+token = "corp-proxy-token"
+
+[services]
+intranet = "127.0.0.1:9443"  # Local port for internal HTTPS
+
+[advanced]
+num_tunnels = 1
+reconnect_enabled = true
+proxy_url = "socks5://proxy.corp.local:1080"

@@ -1,0 +1,13 @@
+bind = "0.0.0.0"
+port = 8443
+cipher = "aes256gcm"
+psk = "corp-proxy-psk"
+token = "corp-proxy-token"
+
+[services]
+intranet = "10.0.0.10:443"
+
+[advanced]
+tcp_keepalive = true
+heartbeat_interval_seconds = 30
+heartbeat_timeout_seconds = 45

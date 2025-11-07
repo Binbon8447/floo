@@ -1,11 +1,10 @@
-# Home network client
-server = "your-cloud-server.com:8443"
+server = "your-vps-ip:8443"
 cipher = "aes256gcm"
-psk = "your-secure-pre-shared-key"
-token = "your-auth-token"
+psk = "emby-reverse-forward-secret-2024"
+token = "emby-access-token"
 
 [reverse_services]
-webapp = "127.0.0.1:8080"  # Forward Jellyfin/Emby running locally
+emby = "127.0.0.1:8096"
 
 [advanced]
 num_tunnels = 2
@@ -18,5 +17,5 @@ socket_buffer_size = 524288
 heartbeat_timeout_seconds = 60
 reconnect_enabled = true
 reconnect_initial_delay_ms = 1000
-reconnect_max_delay_ms = 20000
+reconnect_max_delay_ms = 30000
 reconnect_backoff_multiplier = 2

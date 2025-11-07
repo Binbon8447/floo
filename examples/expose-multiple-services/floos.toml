@@ -1,20 +1,21 @@
-# Server - Multiple Reverse Services
+bind = "0.0.0.0"
 port = 8443
-host = "0.0.0.0"
 cipher = "aegis128l"
-psk = "CHANGE-ME"
-default_token = "CHANGE-ME"
+psk = "multi-service-psk-2024"
+token = "multi-service-token-2024"
 
-[server.services.emby]
-id = 1
-mode = "reverse"
-local_port = 8096
-target_host = "127.0.0.1"
-target_port = 8096
+[reverse_services]
+emby = "0.0.0.0:8096"
+emby.token = "media-only-token"
+ssh = "0.0.0.0:2222"
+ssh.token = "ssh-only-token"
 
-[server.services.ssh]
-id = 2
-mode = "reverse"
-local_port = 2222
-target_host = "127.0.0.1"
-target_port = 22
+[advanced]
+tcp_nodelay = true
+tcp_keepalive = true
+tcp_keepalive_idle = 45
+tcp_keepalive_interval = 10
+tcp_keepalive_count = 3
+socket_buffer_size = 524288
+heartbeat_interval_seconds = 30
+heartbeat_timeout_seconds = 50

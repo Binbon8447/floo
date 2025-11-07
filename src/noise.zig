@@ -1,6 +1,9 @@
 const std = @import("std");
 const crypto = std.crypto;
 const posix = std.posix;
+const common = @import("common.zig");
+const sendAllToFd = common.sendAllToFd;
+const recvAllFromFd = common.recvAllFromFd;
 
 /// Debug logging for Noise protocol (disable in production for performance)
 const enable_noise_debug = false;
@@ -9,22 +12,6 @@ const enable_noise_debug = false;
 inline fn debugPrint(comptime fmt: []const u8, args: anytype) void {
     if (enable_noise_debug) {
         std.debug.print(fmt, args);
-    }
-}
-
-/// Helper function to receive exact number of bytes from socket
-fn recvAll(fd: posix.fd_t, buffer: []u8) !void {
-    var total_received: usize = 0;
-    while (total_received < buffer.len) {
-        const n = posix.recv(fd, buffer[total_received..], 0) catch |err| {
-            debugPrint("[NOISE] recvAll error at offset {}: {}\n", .{ total_received, err });
-            return err;
-        };
-        if (n == 0) {
-            debugPrint("[NOISE] recvAll: connection closed after {} bytes (expected {})\n", .{ total_received, buffer.len });
-            return error.ConnectionClosed;
-        }
-        total_received += n;
     }
 }
 
@@ -48,15 +35,6 @@ test "transport cipher advances nonce and output" {
 
     try std.testing.expect(!std.mem.eql(u8, ct1[0..], ct2[0..]));
     try std.testing.expectEqual(@as(u64, 2), cipher.nonce.load(.monotonic));
-}
-
-/// Helper function to send exact number of bytes to socket
-fn sendAll(fd: posix.fd_t, buffer: []const u8) !void {
-    var total_sent: usize = 0;
-    while (total_sent < buffer.len) {
-        const n = try posix.send(fd, buffer[total_sent..], 0);
-        total_sent += n;
-    }
 }
 
 /// Cipher type for Noise transport
@@ -507,7 +485,7 @@ pub fn noiseXXHandshake(
     if (is_initiator) {
         debugPrint("[NOISE] Initiator: sending ephemeral key ({} bytes)\n", .{e_keypair.public_key.len});
         // -> e
-        try sendAll(fd, &e_keypair.public_key);
+        try sendAllToFd(fd, &e_keypair.public_key);
         debugPrint("[NOISE] Initiator: ephemeral key sent\n", .{});
 
         // Mix e into handshake hash
@@ -519,7 +497,7 @@ pub fn noiseXXHandshake(
         // <- e, ee, s, es
         debugPrint("[NOISE] Initiator: receiving msg2 ({} bytes)\n", .{DH_LEN + DH_LEN + TAG_LEN + TAG_LEN});
         var msg2: [DH_LEN + DH_LEN + TAG_LEN + TAG_LEN]u8 = undefined;
-        try recvAll(fd, &msg2);
+        try recvAllFromFd(fd, &msg2);
         debugPrint("[NOISE] Initiator: msg2 received\n", .{});
 
         const re = msg2[0..DH_LEN];
@@ -615,7 +593,7 @@ pub fn noiseXXHandshake(
         @memcpy(msg3[DH_LEN + TAG_LEN ..], &payload_tag);
 
         debugPrint("[NOISE] Initiator: sending msg3 ({} bytes)\n", .{msg3.len});
-        try sendAll(fd, &msg3);
+        try sendAllToFd(fd, &msg3);
         debugPrint("[NOISE] Initiator: msg3 sent\n", .{});
 
         // Split into transport keys
@@ -631,21 +609,22 @@ pub fn noiseXXHandshake(
         const handshake_hash: []const u8 = h[0..];
         const local_tag = computeAuthTag(psk, handshake_hash, 'I');
         debugPrint("[NOISE] Initiator: sending PSK auth tag ({} bytes)\n", .{local_tag.len});
-        try sendAll(fd, local_tag[0..]);
+        try sendAllToFd(fd, local_tag[0..]);
         debugPrint("[NOISE] Initiator: PSK auth tag sent\n", .{});
         var peer_tag_buf: [HASH_LEN]u8 = undefined;
         debugPrint("[NOISE] Initiator: waiting for server PSK auth tag ({} bytes)\n", .{peer_tag_buf.len});
-        try recvAll(fd, peer_tag_buf[0..]);
+        try recvAllFromFd(fd, peer_tag_buf[0..]);
         debugPrint("[NOISE] Initiator: received server PSK auth tag\n", .{});
         const expected_peer = computeAuthTag(psk, handshake_hash, 'R');
-        if (!std.mem.eql(u8, peer_tag_buf[0..], expected_peer[0..])) return error.AuthenticationFailed;
+        // Use constant-time comparison to prevent timing attacks on PSK authentication
+        if (!common.constantTimeEqual(peer_tag_buf[0..], expected_peer[0..])) return error.AuthenticationFailed;
 
         return result;
     } else {
         debugPrint("[NOISE] Responder: waiting for ephemeral key ({} bytes)\n", .{DH_LEN});
         // <- e
         var re: [DH_LEN]u8 = undefined;
-        try recvAll(fd, &re);
+        try recvAllFromFd(fd, &re);
         debugPrint("[NOISE] Responder: ephemeral key received\n", .{});
 
         // Mix re into h
@@ -706,13 +685,13 @@ pub fn noiseXXHandshake(
         @memcpy(msg2[DH_LEN + DH_LEN + TAG_LEN ..], &payload_tag);
 
         debugPrint("[NOISE] Responder: sending msg2 ({} bytes)\n", .{msg2.len});
-        try sendAll(fd, &msg2);
+        try sendAllToFd(fd, &msg2);
         debugPrint("[NOISE] Responder: msg2 sent\n", .{});
 
         // <- s, se
         debugPrint("[NOISE] Responder: waiting for msg3 ({} bytes)\n", .{DH_LEN + TAG_LEN + TAG_LEN});
         var msg3: [DH_LEN + TAG_LEN + TAG_LEN]u8 = undefined;
-        try recvAll(fd, &msg3);
+        try recvAllFromFd(fd, &msg3);
         debugPrint("[NOISE] Responder: msg3 received\n", .{});
 
         // Decrypt s (using temp_k from previous es operation)
@@ -772,14 +751,15 @@ pub fn noiseXXHandshake(
         const handshake_hash: []const u8 = h[0..];
         var peer_tag_buf: [HASH_LEN]u8 = undefined;
         debugPrint("[NOISE] Responder: waiting for client PSK auth tag ({} bytes)\n", .{peer_tag_buf.len});
-        try recvAll(fd, peer_tag_buf[0..]);
+        try recvAllFromFd(fd, peer_tag_buf[0..]);
         debugPrint("[NOISE] Responder: received client PSK auth tag\n", .{});
         const expected_peer = computeAuthTag(psk, handshake_hash, 'I');
-        if (!std.mem.eql(u8, peer_tag_buf[0..], expected_peer[0..])) return error.AuthenticationFailed;
+        // Use constant-time comparison to prevent timing attacks on PSK authentication
+        if (!common.constantTimeEqual(peer_tag_buf[0..], expected_peer[0..])) return error.AuthenticationFailed;
 
         const local_tag = computeAuthTag(psk, handshake_hash, 'R');
         debugPrint("[NOISE] Responder: sending PSK auth tag ({} bytes)\n", .{local_tag.len});
-        try sendAll(fd, local_tag[0..]);
+        try sendAllToFd(fd, local_tag[0..]);
         debugPrint("[NOISE] Responder: PSK auth tag sent\n", .{});
 
         return result;

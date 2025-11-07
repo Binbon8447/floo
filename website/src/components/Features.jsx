@@ -33,9 +33,9 @@ export default function Features() {
       description: 'Heartbeat supervision with automatic reconnection. Never lose your tunnel.'
     },
     {
-      icon: '🔄',
-      title: 'Hot Reload',
-      description: 'Update configuration without downtime using SIGHUP signal for seamless updates.'
+      icon: '📝',
+      title: 'Config Management',
+      description: 'Tweak TOML configs and restart floos/flooc to apply changes while we rework live reload.'
     },
     {
       icon: '📊',

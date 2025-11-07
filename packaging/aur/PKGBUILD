@@ -10,8 +10,8 @@ provides=('floo' 'flooc' 'floos')
 conflicts=('floo-git')
 source_x86_64=("${pkgname}-${pkgver}-x86_64.tar.gz::https://github.com/YUX/floo/releases/download/v${pkgver}/floo-x86_64-linux-gnu-haswell.tar.gz")
 source_aarch64=("${pkgname}-${pkgver}-aarch64.tar.gz::https://github.com/YUX/floo/releases/download/v${pkgver}/floo-aarch64-linux-gnu.tar.gz")
-sha256sums_x86_64=('TO_BE_CALCULATED') # Update after release
-sha256sums_aarch64=('TO_BE_CALCULATED') # Update after release
+sha256sums_x86_64=('4087230211f3064c3644eb8cad115c94bfa34bc682c07191ea11228f3cd09a66')
+sha256sums_aarch64=('5f0c75550c0bb18fa72d547bc044d28f0eeefedbe399c1903ac06975c679a031')
 
 package() {
     cd "${srcdir}/${pkgname}-${pkgver}-${CARCH}"

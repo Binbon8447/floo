@@ -1,0 +1,14 @@
+# Minimal Floo client configuration
+server = "tunnel.example.com:8443"
+cipher = "aes256gcm"
+psk = "replace-with-strong-psk"
+token = "replace-with-token"
+
+# Option A: expose a local service (reverse mode)
+[reverse_services]
+webapp = "127.0.0.1:3000"
+
+# Option B: reach a remote service (forward mode)
+# Uncomment if you need a local listener instead.
+# [services]
+# db = "127.0.0.1:5432"

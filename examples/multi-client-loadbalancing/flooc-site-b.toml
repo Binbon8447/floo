@@ -1,0 +1,11 @@
+server = "YOUR_SERVER_IP:8443"
+cipher = "aes256gcm"
+psk = "balancer-psk"
+token = "balancer-token"
+
+[reverse_services]
+webcluster = "10.0.2.10:8080"  # Site B origin
+
+[advanced]
+num_tunnels = 2
+reconnect_enabled = true

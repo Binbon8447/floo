@@ -9,7 +9,7 @@ export default function Comparison() {
     { feature: 'Encryption', floo: 'Noise XX + PSK', rathole: 'Noise NK, TLS', frp: 'TLS' },
     { feature: 'Ciphers', floo: '5 AEAD', rathole: 'ChaCha20-Poly1305', frp: 'TLS standard' },
     { feature: 'Parallel Tunnels', floo: '✅ Round-robin (1-16)', rathole: '🔶 Not documented', frp: '✅ Connection pool' },
-    { feature: 'Hot Config Reload', floo: '✅ SIGHUP (both)', rathole: '✅ Dynamic services', frp: '✅ Admin API' },
+  { feature: 'Hot Config Reload', floo: '🔶 Restart (planned)', rathole: '✅ Dynamic services', frp: '✅ Admin API' },
     { feature: 'Built-in Diagnostics', floo: '✅ --doctor, --ping', rathole: '🔶 Logging only', frp: '✅ Dashboard, Prometheus' },
     { feature: 'Proxy Client', floo: '✅ SOCKS5, HTTP', rathole: '✅ SOCKS5, HTTP', frp: '✅ HTTP, SOCKS5' },
   ]

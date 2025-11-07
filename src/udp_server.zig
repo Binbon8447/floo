@@ -1,189 +1,230 @@
 const std = @import("std");
 const posix = std.posix;
 const tunnel = @import("tunnel.zig");
-const config = @import("config.zig");
-const udp_session = @import("udp_session.zig");
+const common = @import("common.zig");
 
-/// UDP forwarder for server side
-/// Handles UDP forwarding from tunnel to target and back
-///
-/// Design: Server maintains a single UDP socket for the target service.
-/// It tracks the most recent client source address to route responses back.
-/// For initial implementation, this is simple and works for most use cases.
+/// Server-side UDP forwarder.
+/// Each tunnel stream gets an independent connected UDP socket so replies from
+/// the target can be associated with the originating client stream.
 pub const UdpForwarder = struct {
     allocator: std.mem.Allocator,
-    target_host: []const u8,
-    target_port: u16,
+    service_id: tunnel.ServiceId,
     target_addr: std.net.Address,
-    udp_fd: posix.fd_t,
-    tunnel_conn: *anyopaque, // Opaque pointer to TunnelConnection
+    tunnel_conn: *anyopaque,
     send_fn: *const fn (conn: *anyopaque, payload: []const u8) anyerror!void,
     running: std.atomic.Value(bool),
-    thread: std.Thread,
-
-    // Track most recent client source for routing responses
-    // This is simplified - proper implementation would track multiple sessions
-    last_source_mutex: std.Thread.Mutex,
-    last_source_service_id: tunnel.ServiceId,
-    last_source_stream_id: tunnel.StreamId,
-    last_source_addr_bytes: [16]u8,
-    last_source_addr_len: u8,
-    last_source_port: u16,
+    timeout_ns: i128,
+    sessions: std.AutoHashMap(tunnel.StreamId, *Session),
+    sessions_mutex: std.Thread.Mutex,
 
     pub fn create(
         allocator: std.mem.Allocator,
+        service_id: tunnel.ServiceId,
         target_host: []const u8,
         target_port: u16,
         tunnel_conn: *anyopaque,
         send_fn: *const fn (conn: *anyopaque, payload: []const u8) anyerror!void,
+        timeout_seconds: u64,
     ) !*UdpForwarder {
-        // Resolve target address
         const target_addr = try std.net.Address.resolveIp(target_host, target_port);
-
-        // Create UDP socket
-        const udp_fd = try posix.socket(
-            posix.AF.INET,
-            posix.SOCK.DGRAM | posix.SOCK.CLOEXEC,
-            0,
-        );
-        errdefer posix.close(udp_fd);
-
         const forwarder = try allocator.create(UdpForwarder);
         forwarder.* = .{
             .allocator = allocator,
-            .target_host = try allocator.dupe(u8, target_host),
-            .target_port = target_port,
+            .service_id = service_id,
             .target_addr = target_addr,
-            .udp_fd = udp_fd,
             .tunnel_conn = tunnel_conn,
             .send_fn = send_fn,
             .running = std.atomic.Value(bool).init(true),
-            .thread = undefined,
-            .last_source_mutex = .{},
-            .last_source_service_id = 0,
-            .last_source_stream_id = 0,
-            .last_source_addr_bytes = undefined,
-            .last_source_addr_len = 0,
-            .last_source_port = 0,
+            .timeout_ns = @as(i128, timeout_seconds) * std.time.ns_per_s,
+            .sessions = std.AutoHashMap(tunnel.StreamId, *Session).init(allocator),
+            .sessions_mutex = .{},
         };
-
-        // Start receiver thread (receives responses from target)
-        forwarder.thread = try std.Thread.spawn(.{
-            .stack_size = 256 * 1024,
-        }, receiveThreadMain, .{forwarder});
-
         return forwarder;
     }
 
-    fn receiveThreadMain(self: *UdpForwarder) void {
-        var buf: [65536]u8 align(64) = undefined;
-        var from_addr: posix.sockaddr.storage = undefined;
-        var from_len: posix.socklen_t = @sizeOf(posix.sockaddr.storage);
-
-        std.debug.print("[UDP-SERVER] Receiver thread started for target {s}:{}\n", .{
-            self.target_host,
-            self.target_port,
-        });
-
-        while (self.running.load(.acquire)) {
-            // Receive UDP response from target
-            const n = posix.recvfrom(
-                self.udp_fd,
-                &buf,
-                0,
-                @ptrCast(&from_addr),
-                &from_len,
-            ) catch |err| {
-                std.debug.print("[UDP-SERVER] recvfrom error: {}\n", .{err});
-                continue;
-            };
-
-            if (n == 0) continue;
-
-            // Get last source info to route response back
-            self.last_source_mutex.lock();
-            const stream_id = self.last_source_stream_id;
-            const service_id = self.last_source_service_id;
-            const source_addr_len = self.last_source_addr_len;
-            var source_addr_bytes: [16]u8 = undefined;
-            @memcpy(source_addr_bytes[0..source_addr_len], self.last_source_addr_bytes[0..source_addr_len]);
-            const source_port = self.last_source_port;
-            self.last_source_mutex.unlock();
-
-            if (source_addr_len == 0) {
-                // No client has sent yet, drop packet
-                continue;
-            }
-
-            std.debug.print("[UDP-SERVER] Received {} bytes from target, routing to stream_id={}\n", .{
-                n,
-                stream_id,
-            });
-
-            // Encode UDP data message to send back through tunnel
-            var encode_buf: [70000]u8 = undefined;
-
-            const udp_msg = tunnel.UdpDataMsg{
-                .service_id = service_id,
-                .stream_id = stream_id,
-                .source_addr = source_addr_bytes[0..source_addr_len],
-                .source_port = source_port,
-                .data = buf[0..n],
-            };
-
-            const encoded_len = udp_msg.encodeInto(&encode_buf) catch |err| {
-                std.debug.print("[UDP-SERVER] Encode error: {}\n", .{err});
-                continue;
-            };
-
-            // Send through tunnel back to client
-            self.send_fn(self.tunnel_conn, encode_buf[0..encoded_len]) catch |err| {
-                std.debug.print("[UDP-SERVER] Tunnel send error: {}\n", .{err});
-            };
+    pub fn handleUdpData(self: *UdpForwarder, udp_msg: tunnel.UdpDataMsg) !void {
+        if (udp_msg.source_addr.len == 0 or udp_msg.source_addr.len > 16) {
+            return error.InvalidSourceAddress;
         }
 
-        std.debug.print("[UDP-SERVER] Receiver thread stopped\n", .{});
-    }
+        const now = std.time.nanoTimestamp();
+        self.pruneExpiredSessions(now);
 
-    /// Handle incoming UDP data from tunnel (forward to target)
-    /// Also saves source address for routing responses back
-    pub fn handleUdpData(self: *UdpForwarder, udp_msg: tunnel.UdpDataMsg) !void {
-        // Save source address for routing responses back
-        self.last_source_mutex.lock();
-        self.last_source_service_id = udp_msg.service_id;
-        self.last_source_stream_id = udp_msg.stream_id;
-        self.last_source_addr_len = @intCast(udp_msg.source_addr.len);
-        @memcpy(self.last_source_addr_bytes[0..udp_msg.source_addr.len], udp_msg.source_addr);
-        self.last_source_port = udp_msg.source_port;
-        self.last_source_mutex.unlock();
+        const session = try self.ensureSession(udp_msg.stream_id, udp_msg.source_addr, udp_msg.source_port, now);
 
-        // Forward to target
-        _ = try posix.sendto(
-            self.udp_fd,
-            udp_msg.data,
-            0,
-            &self.target_addr.any,
-            self.target_addr.getOsSockLen(),
-        );
-
-        std.debug.print("[UDP-SERVER] Forwarded {} bytes to target {s}:{} (stream_id={})\n", .{
-            udp_msg.data.len,
-            self.target_host,
-            self.target_port,
-            udp_msg.stream_id,
-        });
+        _ = posix.send(session.socket_fd, udp_msg.data, 0) catch |err| {
+            std.debug.print("[UDP-SERVER] send error for stream {}: {}\n", .{ udp_msg.stream_id, err });
+            return err;
+        };
+        session.last_activity_ns.store(now, .release);
     }
 
     pub fn stop(self: *UdpForwarder) void {
         self.running.store(false, .release);
-        // Shutdown socket to unblock recvfrom()
-        posix.shutdown(self.udp_fd, .recv) catch {};
-        self.thread.join();
+        var to_close = std.ArrayListUnmanaged(tunnel.StreamId){};
+        defer to_close.deinit(self.allocator);
+
+        self.sessions_mutex.lock();
+        var iter = self.sessions.keyIterator();
+        while (iter.next()) |key_ptr| {
+            if (to_close.append(self.allocator, key_ptr.*)) |_| {} else |_| break;
+        }
+        self.sessions_mutex.unlock();
+
+        for (to_close.items) |stream_id| {
+            self.removeSession(stream_id, false);
+        }
     }
 
     pub fn destroy(self: *UdpForwarder) void {
-        posix.close(self.udp_fd);
-        self.allocator.free(self.target_host);
+        self.stop();
+        self.sessions.deinit();
         self.allocator.destroy(self);
+    }
+
+    const Session = struct {
+        stream_id: tunnel.StreamId,
+        socket_fd: posix.fd_t,
+        thread: std.Thread,
+        running: std.atomic.Value(bool),
+        forwarder: *UdpForwarder,
+        last_activity_ns: std.atomic.Value(i128),
+        source_addr: [16]u8,
+        source_addr_len: u8,
+        source_port: u16,
+    };
+
+    fn ensureSession(
+        self: *UdpForwarder,
+        stream_id: tunnel.StreamId,
+        source_addr: []const u8,
+        source_port: u16,
+        now: i128,
+    ) !*Session {
+        self.sessions_mutex.lock();
+        if (self.sessions.get(stream_id)) |session| {
+            defer self.sessions_mutex.unlock();
+            if (session.source_addr_len != source_addr.len or
+                session.source_port != source_port or
+                !std.mem.eql(u8, session.source_addr[0..session.source_addr_len], source_addr))
+            {
+                return error.UdpForwarderBusy;
+            }
+            return session;
+        }
+        self.sessions_mutex.unlock();
+
+        const fd = try posix.socket(self.target_addr.any.family, posix.SOCK.DGRAM | posix.SOCK.CLOEXEC, 0);
+        errdefer posix.close(fd);
+        try posix.connect(fd, &self.target_addr.any, self.target_addr.getOsSockLen());
+
+        const session = try self.allocator.create(Session);
+        session.* = .{
+            .stream_id = stream_id,
+            .socket_fd = fd,
+            .thread = undefined,
+            .running = std.atomic.Value(bool).init(true),
+            .forwarder = self,
+            .last_activity_ns = std.atomic.Value(i128).init(now),
+            .source_addr = [_]u8{0} ** 16,
+            .source_addr_len = @intCast(source_addr.len),
+            .source_port = source_port,
+        };
+        std.mem.copyForwards(u8, session.source_addr[0..session.source_addr_len], source_addr);
+
+        session.thread = std.Thread.spawn(.{
+            .stack_size = common.DEFAULT_THREAD_STACK,
+        }, sessionRecvThread, .{session}) catch |err| {
+            posix.close(fd);
+            self.allocator.destroy(session);
+            return err;
+        };
+
+        self.sessions_mutex.lock();
+        self.sessions.put(stream_id, session) catch |err| {
+            self.sessions_mutex.unlock();
+            session.running.store(false, .release);
+            posix.shutdown(session.socket_fd, .recv) catch {};
+            session.thread.join();
+            posix.close(session.socket_fd);
+            self.allocator.destroy(session);
+            return err;
+        };
+        self.sessions_mutex.unlock();
+
+        return session;
+    }
+
+    fn sessionRecvThread(session: *Session) void {
+        var buf: [common.SOCKET_BUFFER_SIZE]u8 align(64) = undefined;
+        const forwarder = session.forwarder;
+
+        while (session.running.load(.acquire) and forwarder.running.load(.acquire)) {
+            const n = posix.recv(session.socket_fd, &buf, 0) catch |err| {
+                if (err == error.Interrupted) continue;
+                break;
+            };
+            if (n <= 0) continue;
+
+            session.last_activity_ns.store(std.time.nanoTimestamp(), .release);
+
+            var encode_buf: [70000]u8 = undefined;
+            const udp_msg = tunnel.UdpDataMsg{
+                .service_id = forwarder.service_id,
+                .stream_id = session.stream_id,
+                .source_addr = session.source_addr[0..session.source_addr_len],
+                .source_port = session.source_port,
+                .data = buf[0..n],
+            };
+
+            const encoded_len = udp_msg.encodeInto(&encode_buf) catch {
+                continue;
+            };
+
+            forwarder.send_fn(forwarder.tunnel_conn, encode_buf[0..encoded_len]) catch |err| {
+                std.debug.print("[UDP-SERVER] Failed to send to tunnel: {}\n", .{err});
+            };
+        }
+
+        forwarder.removeSession(session.stream_id, true);
+    }
+
+    fn pruneExpiredSessions(self: *UdpForwarder, now: i128) void {
+        if (self.timeout_ns == 0) return;
+
+        var expired = std.ArrayListUnmanaged(tunnel.StreamId){};
+        defer expired.deinit(self.allocator);
+
+        self.sessions_mutex.lock();
+        var iter = self.sessions.iterator();
+        while (iter.next()) |entry| {
+            const last = entry.value_ptr.*.last_activity_ns.load(.acquire);
+            if ((now - last) > self.timeout_ns) {
+                expired.append(self.allocator, entry.key_ptr.*) catch break;
+            }
+        }
+        self.sessions_mutex.unlock();
+
+        for (expired.items) |stream_id| {
+            self.removeSession(stream_id, false);
+        }
+    }
+
+    fn removeSession(self: *UdpForwarder, stream_id: tunnel.StreamId, caller_is_thread: bool) void {
+        self.sessions_mutex.lock();
+        const entry = self.sessions.fetchRemove(stream_id);
+        self.sessions_mutex.unlock();
+
+        if (entry) |removed| {
+            const session = removed.value;
+            session.running.store(false, .release);
+            posix.shutdown(session.socket_fd, .recv) catch {};
+            if (!caller_is_thread) {
+                session.thread.join();
+            }
+            posix.close(session.socket_fd);
+            self.allocator.destroy(session);
+            std.debug.print("[UDP-SERVER] Session {} closed\n", .{stream_id});
+        }
     }
 };

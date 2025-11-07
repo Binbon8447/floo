@@ -1,8 +1,23 @@
-# Client - Serves Multiple Services
-remote_host = "YOUR_SERVER_IP"
-remote_port = 8443
+server = "YOUR_SERVER_IP:8443"
 cipher = "aegis128l"
-psk = "CHANGE-ME"
-default_token = "CHANGE-ME"
-num_tunnels = 2
+psk = "multi-service-psk-2024"
+token = "multi-service-token-2024"
+
+[reverse_services]
+emby = "127.0.0.1:8096"
+ssh = "127.0.0.1:22"
+ssh.token = "ssh-only-token"
+
+[advanced]
+num_tunnels = 4
+tcp_nodelay = true
+tcp_keepalive = true
+tcp_keepalive_idle = 30
+tcp_keepalive_interval = 10
+tcp_keepalive_count = 3
+socket_buffer_size = 1048576
+heartbeat_timeout_seconds = 60
 reconnect_enabled = true
+reconnect_initial_delay_ms = 1000
+reconnect_max_delay_ms = 30000
+reconnect_backoff_multiplier = 2

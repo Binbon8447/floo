@@ -145,32 +145,88 @@ write_floo_configs() {
         psk_value=""
     fi
 
+    # New config format for server
     cat > "${server_cfg}" <<EOF
+bind = "0.0.0.0"
 port = 8000
-host = "0.0.0.0"
 cipher = "${cipher_value}"
 psk = "${psk_value}"
-default_token = "${TOKEN}"
-
-[server.services.primary]
-id = 1
-transport = "tcp"
-target_host = "127.0.0.1"
-target_port = 9000
 token = "${TOKEN}"
+
+[services]
+benchmark = "127.0.0.1:9000"
+
+[advanced]
+tcp_nodelay = true
+socket_buffer_size = 8388608  # 8MB buffer for high throughput
+heartbeat_interval_seconds = 30
 EOF
 
+    # New config format for client
     cat > "${client_cfg}" <<EOF
-local_port = 9001
-remote_host = "127.0.0.1"
-remote_port = 8000
-target_host = "127.0.0.1"
-target_port = 9000
-num_tunnels = ${NUM_TUNNELS}
+server = "127.0.0.1:8000"
 cipher = "${cipher_value}"
 psk = "${psk_value}"
-service_id = 1
-default_token = "${TOKEN}"
+token = "${TOKEN}"
+
+[services]
+benchmark = "127.0.0.1:9001"
+
+[advanced]
+num_tunnels = ${NUM_TUNNELS}
+tcp_nodelay = true
+socket_buffer_size = 8388608  # 8MB buffer for high throughput
+heartbeat_timeout_seconds = 60
+reconnect_enabled = false
+EOF
+}
+
+write_floo_reverse_configs() {
+    local cipher=$1
+    local floo_mode=$2 # plaintext or ciphered
+    local server_cfg=$3
+    local client_cfg=$4
+
+    local cipher_value="${cipher}"
+    local psk_value="${PSK}"
+    if [[ "${floo_mode}" == "plaintext" ]]; then
+        cipher_value="none"
+        psk_value=""
+    fi
+
+    # Server config for reverse mode
+    cat > "${server_cfg}" <<EOF
+bind = "0.0.0.0"
+port = 8000
+cipher = "${cipher_value}"
+psk = "${psk_value}"
+token = "${TOKEN}"
+
+[reverse_services]
+benchmark = "0.0.0.0:9002"
+
+[advanced]
+tcp_nodelay = true
+socket_buffer_size = 8388608  # 8MB buffer for high throughput
+heartbeat_interval_seconds = 30
+EOF
+
+    # Client config for reverse mode
+    cat > "${client_cfg}" <<EOF
+server = "127.0.0.1:8000"
+cipher = "${cipher_value}"
+psk = "${psk_value}"
+token = "${TOKEN}"
+
+[reverse_services]
+benchmark = "127.0.0.1:9000"
+
+[advanced]
+num_tunnels = ${NUM_TUNNELS}
+tcp_nodelay = true
+socket_buffer_size = 8388608  # 8MB buffer for high throughput
+heartbeat_timeout_seconds = 60
+reconnect_enabled = false
 EOF
 }
 
@@ -196,6 +252,35 @@ run_floo() {
     sleep 2
 
     run_iperf "floo-${label}" 9001 || true
+
+    kill "${flooc_pid}" "${floos_pid}" "${iperf_pid}" 2>/dev/null || true
+    wait "${flooc_pid}" 2>/dev/null || true
+    wait "${floos_pid}" 2>/dev/null || true
+    wait "${iperf_pid}" 2>/dev/null || true
+}
+
+run_floo_reverse() {
+    local cipher=$1
+    local mode=$2
+    local label=$3
+
+    ensure_idle
+    local iperf_pid
+    iperf_pid=$(start_iperf_server 9000)
+
+    local server_cfg="/tmp/floos_reverse_${label}.toml"
+    local client_cfg="/tmp/flooc_reverse_${label}.toml"
+    write_floo_reverse_configs "${cipher}" "${mode}" "${server_cfg}" "${client_cfg}"
+
+    ./zig-out/bin/floos "${server_cfg}" > "/tmp/floos_reverse_${label}.log" 2>&1 &
+    local floos_pid=$!
+    sleep 1
+
+    ./zig-out/bin/flooc "${client_cfg}" > "/tmp/flooc_reverse_${label}.log" 2>&1 &
+    local flooc_pid=$!
+    sleep 2
+
+    run_iperf "floo-reverse-${label}" 9002 || true
 
     kill "${flooc_pid}" "${floos_pid}" "${iperf_pid}" 2>/dev/null || true
     wait "${flooc_pid}" 2>/dev/null || true
@@ -322,15 +407,22 @@ EOF
 trap cleanup EXIT
 
 echo "Running benchmarks (duration=${DURATION}s, streams=${STREAMS})..."
+echo ""
 
+# Raw loopback baseline
+echo "=== Testing raw loopback ==="
 run_raw
+
+# Forward mode benchmarks
+echo ""
+echo "=== Testing forward mode ==="
 declare -a FLOO_TEST_MATRIX=(
     "none:plaintext:plaintext"
-    "chacha20poly1305:noise:chacha20poly1305"
-    "aes256gcm:noise:aes256gcm"
-    "aes128gcm:noise:aes128gcm"
-    "aegis128l:noise:aegis128l"
-    "aegis256:noise:aegis256"
+    "ChaChaPoly:encrypted:chacha20"
+    "AES256GCM:encrypted:aes256gcm"
+    "AESGCM:encrypted:aes128gcm"
+    "AEGIS128L:encrypted:aegis128l"
+    "AEGIS256:encrypted:aegis256"
 )
 
 for spec in "${FLOO_TEST_MATRIX[@]}"; do
@@ -338,6 +430,17 @@ for spec in "${FLOO_TEST_MATRIX[@]}"; do
     run_floo "${cipher}" "${mode}" "${label}"
 done
 
+# Reverse mode benchmarks
+echo ""
+echo "=== Testing reverse mode ==="
+for spec in "${FLOO_TEST_MATRIX[@]}"; do
+    IFS=":" read -r cipher mode label <<< "${spec}"
+    run_floo_reverse "${cipher}" "${mode}" "${label}"
+done
+
+# Competing solutions
+echo ""
+echo "=== Testing competing solutions ==="
 run_frp
 run_rathole
 
@@ -356,8 +459,22 @@ lookup_result() {
     fi
 }
 
-for key in raw-loopback floo-plaintext floo-chacha20poly1305 floo-aes256gcm floo-aes128gcm floo-aegis128l floo-aegis256 frp rathole; do
-    printf "%-25s\t%s\n" "${key}" "$(lookup_result "${key}")" | tee -a "${SUMMARY_FILE}"
+# Print results grouped by category
+echo "Forward Mode:" | tee -a "${SUMMARY_FILE}"
+for key in raw-loopback floo-plaintext floo-chacha20 floo-aes256gcm floo-aes128gcm floo-aegis128l floo-aegis256; do
+    printf "  %-23s\t%s\n" "${key}" "$(lookup_result "${key}")" | tee -a "${SUMMARY_FILE}"
+done
+
+echo "" | tee -a "${SUMMARY_FILE}"
+echo "Reverse Mode:" | tee -a "${SUMMARY_FILE}"
+for key in floo-reverse-plaintext floo-reverse-chacha20 floo-reverse-aes256gcm floo-reverse-aes128gcm floo-reverse-aegis128l floo-reverse-aegis256; do
+    printf "  %-23s\t%s\n" "${key}" "$(lookup_result "${key}")" | tee -a "${SUMMARY_FILE}"
+done
+
+echo "" | tee -a "${SUMMARY_FILE}"
+echo "Other Solutions:" | tee -a "${SUMMARY_FILE}"
+for key in frp rathole; do
+    printf "  %-23s\t%s\n" "${key}" "$(lookup_result "${key}")" | tee -a "${SUMMARY_FILE}"
 done
 
 echo ""

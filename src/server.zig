@@ -10,9 +10,11 @@ const diagnostics = @import("diagnostics.zig");
 const common = @import("common.zig");
 
 const tracePrint = common.tracePrint;
-const tcpOptionsFromConfig = common.tcpOptionsFromConfig;
+const tcpOptionsFromSettings = common.tcpOptionsFromSettings;
 const tuneSocketBuffers = common.tuneSocketBuffers;
 const applyTcpOptions = common.applyTcpOptions;
+const formatAddress = common.formatAddress;
+const resolveHostPort = common.resolveHostPort;
 
 const CheckStatus = diagnostics.CheckStatus;
 
@@ -22,7 +24,6 @@ const enable_tunnel_trace = false;
 
 var global_allocator: std.mem.Allocator = undefined;
 var shutdown_flag: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
-var reload_config_flag: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 var config_path_global: []const u8 = undefined; // Store config path for reload
 var encrypt_total_ns: std.atomic.Value(u64) = std.atomic.Value(u64).init(0);
 var encrypt_calls: std.atomic.Value(u64) = std.atomic.Value(u64).init(0);
@@ -123,14 +124,8 @@ fn loadServerConfigWithOverrides(allocator: std.mem.Allocator, opts: *CliOptions
     return cfg;
 }
 
-/// Format network address for display (IPv4/IPv6).
-/// NOTE: This function is duplicated in client.zig. Consider extracting to common.zig.
-fn formatAddress(addr: std.net.Address, buf: []u8) []const u8 {
-    return std.fmt.bufPrint(buf, "{f}", .{addr}) catch "unavailable";
-}
-
 fn probeTcpTarget(host: []const u8, port: u16) !i128 {
-    const addr = try std.net.Address.resolveIp(host, port);
+    const addr = try resolveHostPort(host, port);
     const fd = try posix.socket(addr.any.family, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
     errdefer posix.close(fd);
 
@@ -154,12 +149,12 @@ fn runServerPing(allocator: std.mem.Allocator, opts: *CliOptions) !bool {
     while (service_iter.next()) |service| {
         service_count += 1;
         if (service.transport == .tcp) {
-            const duration = probeTcpTarget(service.target_host, service.target_port) catch |err| {
+            const duration = probeTcpTarget(service.address, service.port) catch |err| {
                 diagnostics.reportCheck(.fail, "Service '{s}' ({}) unreachable at {s}:{d}: {}", .{
                     service.name,
-                    service.service_id,
-                    service.target_host,
-                    service.target_port,
+                    service.id,
+                    service.address,
+                    service.port,
                     err,
                 });
                 had_fail = true;
@@ -168,18 +163,18 @@ fn runServerPing(allocator: std.mem.Allocator, opts: *CliOptions) !bool {
             const ms = @as(f64, @floatFromInt(duration)) / @as(f64, std.time.ns_per_ms);
             diagnostics.reportCheck(.ok, "Service '{s}' ({}) reachable ({s}:{d}) - connect {d:.2} ms", .{
                 service.name,
-                service.service_id,
-                service.target_host,
-                service.target_port,
+                service.id,
+                service.address,
+                service.port,
                 ms,
             });
         } else {
-            _ = std.net.Address.resolveIp(service.target_host, service.target_port) catch |err| {
+            _ = std.net.Address.resolveIp(service.address, service.port) catch |err| {
                 diagnostics.reportCheck(.fail, "Service '{s}' ({}) UDP target {s}:{d} not resolvable: {}", .{
                     service.name,
-                    service.service_id,
-                    service.target_host,
-                    service.target_port,
+                    service.id,
+                    service.address,
+                    service.port,
                     err,
                 });
                 had_fail = true;
@@ -187,9 +182,9 @@ fn runServerPing(allocator: std.mem.Allocator, opts: *CliOptions) !bool {
             };
             diagnostics.reportCheck(.ok, "Service '{s}' ({}) UDP target {s}:{d} resolves successfully", .{
                 service.name,
-                service.service_id,
-                service.target_host,
-                service.target_port,
+                service.id,
+                service.address,
+                service.port,
             });
         }
     }
@@ -222,8 +217,10 @@ fn runServerDoctor(allocator: std.mem.Allocator, opts: *CliOptions) !bool {
 
     var had_fail = false;
     diagnostics.reportCheck(.ok, "Configuration parsed (services: {})", .{cfg.services.count()});
+    diagnostics.reportCheck(.ok, "Server version: {s}", .{build_options.version});
 
-    if (std.ascii.eqlIgnoreCase(cfg.cipher, "none")) {
+    const canonical_cipher = config.canonicalCipher(&cfg);
+    if (std.mem.eql(u8, canonical_cipher, "none")) {
         diagnostics.reportCheck(.warn, "Encryption disabled; relying solely on tokens", .{});
     } else if (cfg.psk.len == 0) {
         diagnostics.reportCheck(.fail, "PSK is empty; clients cannot authenticate", .{});
@@ -240,14 +237,14 @@ fn runServerDoctor(allocator: std.mem.Allocator, opts: *CliOptions) !bool {
             break;
         }
     }
-    if ((require_default_token or cfg.services.count() == 0) and cfg.default_token.len == 0) {
+    if ((require_default_token or cfg.services.count() == 0) and cfg.token.len == 0) {
         diagnostics.reportCheck(.warn, "Default token is empty; unauthenticated clients may connect", .{});
-    } else if (cfg.default_token.len > 0 and std.mem.eql(u8, cfg.default_token, config.DEFAULT_TOKEN)) {
+    } else if (cfg.token.len > 0 and std.mem.eql(u8, cfg.token, config.DEFAULT_TOKEN)) {
         diagnostics.reportCheck(.warn, "Default token uses placeholder value; update to a secret", .{});
     }
 
-    const listen_addr = std.net.Address.parseIp4(cfg.host, cfg.port) catch |err| {
-        diagnostics.reportCheck(.fail, "Invalid listen address {s}:{d}: {}", .{ cfg.host, cfg.port, err });
+    const listen_addr = resolveHostPort(cfg.bind, cfg.port) catch |err| {
+        diagnostics.reportCheck(.fail, "Invalid listen address {s}:{d}: {}", .{ cfg.bind, cfg.port, err });
         return false;
     };
 
@@ -258,13 +255,13 @@ fn runServerDoctor(allocator: std.mem.Allocator, opts: *CliOptions) !bool {
         posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, &std.mem.toBytes(reuse)) catch {};
         const bind_result = posix.bind(fd, &listen_addr.any, listen_addr.getOsSockLen());
         if (bind_result) |_| {
-            diagnostics.reportCheck(.ok, "Bind check succeeded on {s}:{d}", .{ cfg.host, cfg.port });
+            diagnostics.reportCheck(.ok, "Bind check succeeded on {s}:{d}", .{ cfg.bind, cfg.port });
         } else |err| {
             if (err == error.AddressInUse) {
-                diagnostics.reportCheck(.warn, "Port {d} already in use on {s}", .{ cfg.port, cfg.host });
+                diagnostics.reportCheck(.warn, "Port {d} already in use on {s}", .{ cfg.port, cfg.bind });
                 had_fail = true;
             } else {
-                diagnostics.reportCheck(.fail, "Failed to bind {s}:{d}: {}", .{ cfg.host, cfg.port, err });
+                diagnostics.reportCheck(.fail, "Failed to bind {s}:{d}: {}", .{ cfg.bind, cfg.port, err });
                 return false;
             }
         }
@@ -309,11 +306,141 @@ fn handleSignal(sig: c_int) callconv(.c) void {
         std.debug.print("\n[SHUTDOWN] Received interrupt, stopping server...\n", .{});
         shutdown_flag.store(true, .release);
     } else if (sig == posix.SIG.HUP) {
-        std.debug.print("\n[RELOAD] Received SIGHUP, reloading configuration...\n", .{});
-        reload_config_flag.store(true, .release);
+        std.debug.print("\n[INFO] Configuration reload via SIGHUP is currently disabled; restart floos to apply changes.\n", .{});
     } else if (@hasDecl(posix.SIG, "USR1") and sig == posix.SIG.USR1) {
         diagnostics.flushEncryptStats("server", &encrypt_total_ns, &encrypt_calls);
     }
+}
+
+/// Reverse service listener - accepts connections and forwards through tunnel to client
+const ReverseListener = struct {
+    allocator: std.mem.Allocator,
+    service: config.Service,
+    listen_fd: posix.fd_t,
+    thread: std.Thread,
+    running: std.atomic.Value(bool),
+    tunnel_conn: *TunnelConnection,
+    thread_joined: std.atomic.Value(bool),
+
+    fn create(
+        allocator: std.mem.Allocator,
+        service: config.Service,
+        tunnel_conn: *TunnelConnection,
+    ) !*ReverseListener {
+        const addr = try resolveHostPort(service.address, service.port);
+        const listen_fd = try posix.socket(addr.any.family, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+        errdefer posix.close(listen_fd);
+
+        const reuse: c_int = 1;
+        try posix.setsockopt(listen_fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, &std.mem.toBytes(reuse));
+        try posix.bind(listen_fd, &addr.any, addr.getOsSockLen());
+        try posix.listen(listen_fd, common.LISTEN_BACKLOG);
+
+        const listener = try allocator.create(ReverseListener);
+        listener.* = .{
+            .allocator = allocator,
+            .service = service,
+            .listen_fd = listen_fd,
+            .thread = undefined,
+            .running = std.atomic.Value(bool).init(true),
+            .tunnel_conn = tunnel_conn,
+            .thread_joined = std.atomic.Value(bool).init(false),
+        };
+
+        listener.thread = try std.Thread.spawn(.{
+            .stack_size = common.DEFAULT_THREAD_STACK,
+        }, acceptorThread, .{listener});
+
+        std.debug.print("[REVERSE] Listening on {s}:{} for service '{s}' (id={})\n", .{
+            service.address,
+            service.port,
+            service.name,
+            service.id,
+        });
+
+        return listener;
+    }
+
+    fn acceptorThread(self: *ReverseListener) void {
+        while (self.running.load(.acquire)) {
+            if (!self.tunnel_conn.running.load(.acquire)) break;
+            const client_fd = posix.accept(self.listen_fd, null, null, posix.SOCK.CLOEXEC) catch |err| {
+                if (err == error.Interrupted) continue;
+                std.debug.print("[REVERSE] Accept error on {s}:{}: {}\n", .{ self.service.address, self.service.port, err });
+                break;
+            };
+
+            std.debug.print("[REVERSE] Accepted connection on {s}:{}\n", .{ self.service.address, self.service.port });
+
+            // Allocate stream ID
+            const stream_id = self.tunnel_conn.next_stream_id.fetchAdd(1, .acq_rel);
+
+            // Send REVERSE_CONNECT to client
+            const msg = tunnel.ReverseConnectMsg{
+                .service_id = self.service.id,
+                .stream_id = stream_id,
+            };
+
+            var encode_buf: [64]u8 = undefined;
+            const encoded_len = msg.encodeInto(&encode_buf) catch {
+                std.debug.print("[REVERSE] Failed to encode REVERSE_CONNECT\n", .{});
+                posix.close(client_fd);
+                continue;
+            };
+
+            self.tunnel_conn.sendEncryptedMessage(encode_buf[0..encoded_len]) catch |err| {
+                std.debug.print("[REVERSE] Failed to send REVERSE_CONNECT: {}\n", .{err});
+                posix.close(client_fd);
+                continue;
+            };
+
+            std.debug.print("[REVERSE] Sent REVERSE_CONNECT service_id={} stream_id={}\n", .{ self.service.id, stream_id });
+
+            // Create Stream for this connection
+            const stream = Stream.create(self.allocator, self.service.id, stream_id, client_fd, self.tunnel_conn) catch |err| {
+                std.debug.print("[REVERSE] Failed to create stream: {}\n", .{err});
+                posix.close(client_fd);
+                continue;
+            };
+
+            // Add stream to tunnel's streams map (CRITICAL for reverse routing)
+            const key = StreamKey{ .service_id = self.service.id, .stream_id = stream_id };
+            self.tunnel_conn.streams_mutex.lock();
+            defer self.tunnel_conn.streams_mutex.unlock();
+
+            stream.acquireRef(); // map reference
+            self.tunnel_conn.streams.put(key, stream) catch |err| {
+                std.debug.print("[REVERSE] Failed to register stream: {}\n", .{err});
+                stream.releaseRef(); // undo map reference
+                stream.stop();
+                continue;
+            };
+
+            std.debug.print("[REVERSE] Stream {} registered and ready\n", .{stream_id});
+        }
+
+        std.debug.print("[REVERSE] Acceptor thread for {s}:{} exiting\n", .{ self.service.address, self.service.port });
+    }
+
+    fn stop(self: *ReverseListener) void {
+        if (self.thread_joined.swap(true, .acq_rel)) return;
+        self.running.store(false, .release);
+        posix.shutdown(self.listen_fd, .recv) catch {};
+        self.thread.join();
+        posix.close(self.listen_fd);
+    }
+
+    fn destroy(self: *ReverseListener) void {
+        self.allocator.destroy(self);
+    }
+};
+
+fn stopAllReverseListeners(list: *std.ArrayListUnmanaged(*ReverseListener)) void {
+    for (list.items) |listener| {
+        listener.stop();
+        listener.destroy();
+    }
+    list.clearRetainingCapacity();
 }
 
 /// Represents a forwarding stream (tunnel -> target)
@@ -325,6 +452,8 @@ const Stream = struct {
     thread: std.Thread,
     running: std.atomic.Value(bool),
     fd_closed: std.atomic.Value(bool), // Track if target_fd is closed
+    ref_count: std.atomic.Value(usize),
+    thread_joined: std.atomic.Value(bool),
 
     fn create(allocator: std.mem.Allocator, service_id: tunnel.ServiceId, stream_id: tunnel.StreamId, target_fd: posix.fd_t, tunnel_conn: *TunnelConnection) !*Stream {
         const stream = try allocator.create(Stream);
@@ -336,22 +465,56 @@ const Stream = struct {
             .thread = undefined,
             .running = std.atomic.Value(bool).init(true),
             .fd_closed = std.atomic.Value(bool).init(false),
+            .ref_count = std.atomic.Value(usize).init(1), // owned by worker thread
+            .thread_joined = std.atomic.Value(bool).init(false),
         };
 
         // Spawn thread to handle target -> tunnel forwarding
         stream.thread = try std.Thread.spawn(.{
-            .stack_size = 256 * 1024, // 256KB stack (sufficient for 64KB buffer + overhead)
+            .stack_size = common.DEFAULT_THREAD_STACK,
         }, streamThreadMain, .{stream});
 
         return stream;
     }
 
+    fn acquireRef(self: *Stream) void {
+        _ = self.ref_count.fetchAdd(1, .acq_rel);
+    }
+
+    fn releaseRef(self: *Stream) void {
+        const previous = self.ref_count.fetchSub(1, .acq_rel);
+        std.debug.assert(previous > 0);
+        if (previous == 1) {
+            self.destroyInternal();
+        }
+    }
+
+    fn destroyInternal(self: *Stream) void {
+        global_allocator.destroy(self);
+    }
+
     fn streamThreadMain(self: *Stream) void {
-        var buf: [65536]u8 align(64) = undefined; // 64KB, cache-aligned (optimal size)
+        var buf: [common.SOCKET_BUFFER_SIZE]u8 align(64) = undefined;
         var frame_buf: [70016]u8 align(64) = undefined; // Buffer for framing + tag
         const message_header_len: usize = 7;
 
         std.debug.print("[STREAM {}] Thread started, reading from target fd={}\n", .{ self.stream_id, self.target_fd });
+
+        // Ensure we remove ourselves from the HashMap on exit and drop references
+        defer {
+            const key = StreamKey{ .service_id = self.service_id, .stream_id = self.stream_id };
+            var released_map_ref = false;
+            self.tunnel.streams_mutex.lock();
+            if (self.tunnel.streams.remove(key)) {
+                released_map_ref = true;
+            }
+            self.tunnel.streams_mutex.unlock();
+            if (released_map_ref) {
+                self.releaseRef(); // drop map-held reference
+            }
+            std.debug.print("[STREAM {}] Removed from streams map\n", .{self.stream_id});
+            self.releaseRef(); // drop worker-thread reference
+        }
 
         while (self.running.load(.acquire)) {
             // Blocking read from target
@@ -429,16 +592,13 @@ const Stream = struct {
     }
 
     fn stop(self: *Stream) void {
+        if (self.thread_joined.swap(true, .acq_rel)) return;
         self.running.store(false, .release);
         // Shutdown socket to unblock recv() call in thread (only if not already closed)
         if (!self.fd_closed.load(.acquire)) {
             posix.shutdown(self.target_fd, .recv) catch {};
         }
         self.thread.join();
-    }
-
-    fn destroy(self: *Stream) void {
-        global_allocator.destroy(self);
     }
 };
 
@@ -455,7 +615,7 @@ const TunnelConnection = struct {
     running: std.atomic.Value(bool),
 
     // Pre-allocated buffer for control messages (avoid per-frame allocation)
-    control_msg_buffer: [4096]u8, // 4KB buffer for control messages (CONNECT_ACK, CLOSE, etc.)
+    control_msg_buffer: [common.CONTROL_MSG_BUFFER_SIZE]u8,
     control_msg_mutex: std.Thread.Mutex,
 
     // UDP support (only one forwarder per tunnel connection)
@@ -465,6 +625,9 @@ const TunnelConnection = struct {
     // Heartbeat support
     heartbeat_interval_ms: u32, // Heartbeat interval in milliseconds (0 = disabled)
     heartbeat_thread: ?std.Thread, // Heartbeat sender thread
+
+    // Stream ID allocation for reverse services
+    next_stream_id: std.atomic.Value(u32),
 
     // Config reference for TCP tuning
     cfg: *const config.ServerConfig,
@@ -513,7 +676,8 @@ const TunnelConnection = struct {
     fn create(allocator: std.mem.Allocator, tunnel_fd: posix.fd_t, cfg: *const config.ServerConfig, static_keypair: std.crypto.dh.X25519.KeyPair) !*TunnelConnection {
         setSockOpts(tunnel_fd, cfg);
 
-        const encryption_enabled = !std.ascii.eqlIgnoreCase(cfg.cipher, "none");
+        const canonical_cipher = config.canonicalCipher(cfg);
+        const encryption_enabled = !std.mem.eql(u8, canonical_cipher, "none");
 
         var tunnel_fd_owned = true;
         errdefer if (tunnel_fd_owned) posix.close(tunnel_fd);
@@ -524,7 +688,10 @@ const TunnelConnection = struct {
         errdefer if (decrypt_buffer.len != 0) allocator.free(decrypt_buffer);
 
         if (encryption_enabled) {
-            const cipher_type = noise.CipherType.fromString(cfg.cipher) catch .chacha20poly1305;
+            const cipher_type = noise.CipherType.fromString(canonical_cipher) catch {
+                std.debug.print("[NOISE] Invalid cipher '{s}' in configuration\n", .{cfg.cipher});
+                return error.InvalidCipher;
+            };
 
             // Perform Noise_XX handshake (server is responder, uses persistent static key)
             const handshake = noise.noiseXXHandshake(tunnel_fd, cipher_type, false, static_keypair, cfg.psk) catch |err| switch (err) {
@@ -539,6 +706,62 @@ const TunnelConnection = struct {
             recv_cipher = handshake.recv_cipher;
 
             decrypt_buffer = try allocator.alloc(u8, protocol.MAX_FRAME_SIZE);
+
+            // Exchange version information after successful handshake
+            // Server receives client version first
+            var frame_buf: [256]u8 = undefined;
+            var frame_offset: usize = 0;
+
+            // Read frame header (4 bytes)
+            while (frame_offset < 4) {
+                const n = try posix.recv(tunnel_fd, frame_buf[frame_offset..], 0);
+                if (n == 0) return error.ConnectionClosed;
+                frame_offset += n;
+            }
+
+            const frame_len = std.mem.readInt(u32, frame_buf[0..4], .big);
+            if (frame_len > frame_buf.len - 4) return error.FrameTooLarge;
+
+            // Read frame payload
+            while (frame_offset < 4 + frame_len) {
+                const n = try posix.recv(tunnel_fd, frame_buf[frame_offset..], 0);
+                if (n == 0) return error.ConnectionClosed;
+                frame_offset += n;
+            }
+
+            // Decrypt client version
+            var decrypted_version: [128]u8 = undefined;
+            const decrypted_len = frame_len - noise.TAG_LEN;
+            try recv_cipher.?.decrypt(frame_buf[4 .. 4 + frame_len], decrypted_version[0..decrypted_len]);
+
+            // Parse version message
+            const client_version_msg = try tunnel.VersionMsg.decode(decrypted_version[0..decrypted_len], allocator);
+            defer allocator.free(client_version_msg.version);
+
+            // Check version compatibility
+            if (!std.mem.eql(u8, client_version_msg.version, build_options.version)) {
+                std.debug.print("[ERROR] Version mismatch: server={s}, client={s}\n", .{ build_options.version, client_version_msg.version });
+                std.debug.print("[ERROR] Rejecting connection - versions must match\n", .{});
+                return error.VersionMismatch;
+            }
+
+            std.debug.print("[SERVER] Version check passed: {s}\n", .{build_options.version});
+
+            // Send our version to client
+            const server_version_msg = tunnel.VersionMsg{ .version = build_options.version };
+            var version_buf: [64]u8 = undefined;
+            const version_len = try server_version_msg.encodeInto(&version_buf);
+
+            // Encrypt and send our version
+            var encrypted_version: [128]u8 = undefined;
+            const encrypted_len = version_len + noise.TAG_LEN;
+            try send_cipher.?.encrypt(version_buf[0..version_len], encrypted_version[0..encrypted_len]);
+
+            // Write frame directly (no mutex needed during handshake)
+            var frame_header: [4]u8 = undefined;
+            std.mem.writeInt(u32, &frame_header, @intCast(encrypted_len), .big);
+            try common.sendAllToFd(tunnel_fd, &frame_header);
+            try common.sendAllToFd(tunnel_fd, encrypted_version[0..encrypted_len]);
         }
 
         const conn = try allocator.create(TunnelConnection);
@@ -558,8 +781,9 @@ const TunnelConnection = struct {
             .control_msg_mutex = .{},
             .udp_forwarder = null,
             .udp_service_id = null,
-            .heartbeat_interval_ms = cfg.heartbeat_interval_seconds * 1000, // Convert to milliseconds
+            .heartbeat_interval_ms = cfg.advanced.heartbeat_interval_seconds * 1000, // Convert to milliseconds
             .heartbeat_thread = null,
+            .next_stream_id = std.atomic.Value(u32).init(1),
             .cfg = cfg,
         };
         tunnel_fd_owned = false;
@@ -571,15 +795,22 @@ const TunnelConnection = struct {
                 conn.destroy();
                 return err;
             };
-            std.debug.print("[TUNNEL] Heartbeat enabled: sending every {} seconds\n", .{cfg.heartbeat_interval_seconds});
+            std.debug.print("[TUNNEL] Heartbeat enabled: sending every {} seconds\n", .{cfg.advanced.heartbeat_interval_seconds});
         }
 
         return conn;
     }
 
     fn setSockOpts(fd: posix.fd_t, cfg: *const config.ServerConfig) void {
-        applyTcpOptions(fd, tcpOptionsFromConfig(cfg));
-        tuneSocketBuffers(fd, cfg.socket_buffer_size);
+        const tcp_options = common.TcpOptions{
+            .nodelay = cfg.advanced.tcp_nodelay,
+            .keepalive = cfg.advanced.tcp_keepalive,
+            .keepalive_idle = cfg.advanced.tcp_keepalive_idle,
+            .keepalive_interval = cfg.advanced.tcp_keepalive_interval,
+            .keepalive_count = cfg.advanced.tcp_keepalive_count,
+        };
+        applyTcpOptions(fd, tcp_options);
+        tuneSocketBuffers(fd, cfg.advanced.socket_buffer_size);
     }
 
     fn run(self: *TunnelConnection) void {
@@ -590,6 +821,8 @@ const TunnelConnection = struct {
         // Check if decoder buffer was allocated
         if (decoder.buffer.len == 0) {
             std.debug.print("[TUNNEL] Failed to allocate decoder buffer!\n", .{});
+            self.cleanup();
+            self.running.store(false, .release);
             return;
         }
 
@@ -671,17 +904,28 @@ const TunnelConnection = struct {
             },
             .connect => {
                 const connect_msg = try tunnel.ConnectMsg.decode(message_slice, global_allocator);
-                defer global_allocator.free(connect_msg.target_host);
                 defer global_allocator.free(connect_msg.token);
 
-                tracePrint(enable_tunnel_trace, "[TUNNEL] CONNECT request: stream_id={} target={s}:{}\n", .{ connect_msg.stream_id, connect_msg.target_host, connect_msg.target_port });
+                tracePrint(enable_tunnel_trace, "[TUNNEL] CONNECT request: service_id={} stream_id={}\n", .{
+                    connect_msg.service_id,
+                    connect_msg.stream_id,
+                });
 
                 self.handleConnect(connect_msg) catch |err| {
                     std.debug.print("[TUNNEL] Failed to connect: {}\n", .{err});
+                    // Map error to error code
+                    const error_code: tunnel.ErrorCode = switch (err) {
+                        error.UnknownService => .unknown_service,
+                        error.AuthenticationFailed => .authentication_failed,
+                        error.ConnectionRefused => .connection_refused,
+                        error.ConnectionTimedOut => .connection_timeout,
+                        else => .internal_error,
+                    };
                     // Send error response (no allocation - use stack buffer)
                     const error_msg = tunnel.ConnectErrorMsg{
                         .service_id = connect_msg.service_id,
                         .stream_id = connect_msg.stream_id,
+                        .error_code = error_code,
                         .error_msg = "Connection failed",
                     };
 
@@ -696,15 +940,19 @@ const TunnelConnection = struct {
             .data => {
                 const data_msg = try tunnel.DataMsg.decode(message_slice);
 
-                self.streams_mutex.lock();
                 const key = StreamKey{ .service_id = data_msg.service_id, .stream_id = data_msg.stream_id };
-                const stream = self.streams.get(key);
+                var stream_ref: ?*Stream = null;
+
+                self.streams_mutex.lock();
+                if (self.streams.get(key)) |s| {
+                    s.acquireRef();
+                    stream_ref = s;
+                }
                 self.streams_mutex.unlock();
 
-                if (stream) |s| {
-                    // Check if fd is still valid before sending
+                if (stream_ref) |s| {
+                    defer s.releaseRef();
                     if (!s.fd_closed.load(.acquire)) {
-                        // Forward to target (loop until all data sent)
                         sendAllToFd(s.target_fd, data_msg.data) catch |err| {
                             std.debug.print("[STREAM {}] Send to target failed: {}\n", .{ data_msg.stream_id, err });
                         };
@@ -715,14 +963,20 @@ const TunnelConnection = struct {
                 const close_msg = try tunnel.CloseMsg.decode(message_slice);
                 tracePrint(enable_tunnel_trace, "[TUNNEL] CLOSE service_id={} stream_id={}\n", .{ close_msg.service_id, close_msg.stream_id });
 
-                self.streams_mutex.lock();
                 const key = StreamKey{ .service_id = close_msg.service_id, .stream_id = close_msg.stream_id };
+                self.streams_mutex.lock();
                 const maybe_stream = self.streams.fetchRemove(key);
                 self.streams_mutex.unlock();
 
                 if (maybe_stream) |entry| {
+                    // Stream still exists, stop and destroy it
+                    // Note: The stream may have already removed itself, in which case this won't execute
                     entry.value.stop();
-                    entry.value.destroy();
+                    entry.value.releaseRef(); // drop map reference
+                    std.debug.print("[TUNNEL] Stream {} cleaned up after CLOSE message\n", .{close_msg.stream_id});
+                } else {
+                    // Stream already cleaned itself up
+                    tracePrint(enable_tunnel_trace, "[TUNNEL] Stream {} already removed (self-cleanup)\n", .{close_msg.stream_id});
                 }
             },
             .udp_data => {
@@ -743,15 +997,15 @@ const TunnelConnection = struct {
                 defer global_allocator.free(err_msg.error_msg);
                 std.debug.print("[TUNNEL-REVERSE] CONNECT_ERROR from client: stream_id={} error={s}\n", .{ err_msg.stream_id, err_msg.error_msg });
 
-                // Close the stream on the server side
-                self.streams_mutex.lock();
                 const key = StreamKey{ .service_id = err_msg.service_id, .stream_id = err_msg.stream_id };
+                self.streams_mutex.lock();
                 const maybe_stream = self.streams.fetchRemove(key);
                 self.streams_mutex.unlock();
 
                 if (maybe_stream) |entry| {
                     entry.value.stop();
-                    entry.value.destroy();
+                    entry.value.releaseRef();
+                    std.debug.print("[TUNNEL-REVERSE] Stream {} cleaned up after CONNECT_ERROR\n", .{err_msg.stream_id});
                 }
             },
             .heartbeat => {
@@ -760,70 +1014,77 @@ const TunnelConnection = struct {
                 const heartbeat_msg = try tunnel.HeartbeatMsg.decode(message_slice);
                 tracePrint(enable_tunnel_trace, "[HEARTBEAT] Received from client: timestamp={}\n", .{heartbeat_msg.timestamp});
             },
+            .version => {
+                // Version exchange happens during handshake only
+                // Receiving it here would be unexpected, just ignore
+                tracePrint(enable_tunnel_trace, "[SERVER] Unexpected VERSION message during operation (ignoring)\n", .{});
+            },
+            .reverse_connect => {
+                // Server sends REVERSE_CONNECT, doesn't receive it
+                // If we receive it, something is wrong - just ignore
+                tracePrint(enable_tunnel_trace, "[SERVER] Unexpected REVERSE_CONNECT from client (ignoring)\n", .{});
+            },
         }
     }
 
     fn handleConnect(self: *TunnelConnection, msg: tunnel.ConnectMsg) !void {
-        const service_ptr = self.cfg.getService(msg.service_id) orelse {
+        const service_ptr = self.cfg.getServiceById(msg.service_id) orelse {
             std.debug.print("[AUTH] Unknown service_id={} stream_id={}\n", .{ msg.service_id, msg.stream_id });
             return error.UnknownService;
         };
         const service = service_ptr.*;
 
-        // Reverse mode services don't handle CONNECT from client
-        // (server initiates CONNECT to client in reverse mode)
-        if (service.mode == .reverse) {
-            std.debug.print("[REVERSE] Ignoring CONNECT from client for reverse service_id={}\n", .{msg.service_id});
-            return error.InvalidOperation;
-        }
-
-        const expected_token = if (service.token.len > 0) service.token else self.cfg.default_token;
+        // Verify authentication token
+        const expected_token = if (service.token.len > 0) service.token else self.cfg.token;
         if (expected_token.len > 0) {
-            if (!std.mem.eql(u8, msg.token, expected_token)) {
+            // Use constant-time comparison to prevent timing attacks
+            if (!common.constantTimeEqual(msg.token, expected_token)) {
                 std.debug.print("[AUTH] Invalid token for service_id={} stream_id={}\n", .{ msg.service_id, msg.stream_id });
                 return error.AuthenticationFailed;
             }
             std.debug.print("[AUTH] Token validated for service_id={} stream_id={}\n", .{ msg.service_id, msg.stream_id });
         }
 
-        if (!std.mem.eql(u8, msg.target_host, service.target_host) or msg.target_port != service.target_port) {
-            std.debug.print("[AUTH] Client target override ignored for service_id={} stream_id={}\n", .{ msg.service_id, msg.stream_id });
-        }
-
         switch (service.transport) {
             .tcp => {
-                const address = try std.net.Address.parseIp4(service.target_host, service.target_port);
-                const target_fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
-                errdefer posix.close(target_fd);
+                const address = try resolveHostPort(service.address, service.port);
+                const target_fd = try posix.socket(address.any.family, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+                var target_fd_guard = true;
+                defer if (target_fd_guard) posix.close(target_fd);
 
                 setSockOpts(target_fd, self.cfg);
 
                 try posix.connect(target_fd, &address.any, address.getOsSockLen());
 
-                tracePrint(enable_stream_trace, "[STREAM {}] Connected to {s}:{}\n", .{ msg.stream_id, service.target_host, service.target_port });
+                tracePrint(enable_stream_trace, "[STREAM {}] Connected to {s}:{}\n", .{ msg.stream_id, service.address, service.port });
 
                 const stream = try Stream.create(global_allocator, msg.service_id, msg.stream_id, target_fd, self);
+                target_fd_guard = false; // ownership transferred to Stream
 
                 self.streams_mutex.lock();
+                defer self.streams_mutex.unlock();
+
                 const key = StreamKey{ .service_id = msg.service_id, .stream_id = msg.stream_id };
+                stream.acquireRef(); // map reference
                 self.streams.put(key, stream) catch |err| {
-                    self.streams_mutex.unlock();
+                    // Drop map ref before shutting down thread
+                    stream.releaseRef();
                     stream.stop();
-                    stream.destroy();
                     return err;
                 };
-                self.streams_mutex.unlock();
             },
             .udp => {
                 if (self.udp_forwarder == null) {
-                    std.debug.print("[UDP] Creating UDP forwarder for target {s}:{}\n", .{ service.target_host, service.target_port });
+                    std.debug.print("[UDP] Creating UDP forwarder for target {s}:{}\n", .{ service.address, service.port });
 
                     const forwarder = try udp_server.UdpForwarder.create(
                         global_allocator,
-                        service.target_host,
-                        service.target_port,
+                        msg.service_id,
+                        service.address,
+                        service.port,
                         @ptrCast(self),
                         sendEncryptedMessageWrapper,
+                        self.cfg.advanced.udp_timeout_seconds,
                     );
                     self.udp_forwarder = forwarder;
                     self.udp_service_id = msg.service_id;
@@ -857,9 +1118,9 @@ const TunnelConnection = struct {
     /// NOTE: Similar implementation exists in client.zig. Consider unifying.
     fn sendPlainFrame(self: *TunnelConnection, payload: []const u8) !void {
         self.send_mutex.lock();
-        const send_result = self.writeFrameLocked(payload);
-        self.send_mutex.unlock();
-        send_result catch |err| {
+        defer self.send_mutex.unlock();
+
+        self.writeFrameLocked(payload) catch |err| {
             self.handleSendFailure(err);
             return err;
         };
@@ -873,50 +1134,13 @@ const TunnelConnection = struct {
     }
 
     /// Send all data to a file descriptor, looping until complete.
-    /// This handles partial writes correctly (blocking sockets can still short-write).
-    /// NOTE: This function is duplicated in client.zig. Consider extracting to common.zig.
-    fn sendAllToFd(fd: posix.fd_t, data: []const u8) !void {
-        var offset: usize = 0;
-        while (offset < data.len) {
-            const n = posix.send(fd, data[offset..], 0) catch |err| return err;
-            if (n == 0) return error.ConnectionClosed;
-            offset += n;
-        }
-    }
+    /// Extracted to common.zig to eliminate duplication with client.zig.
+    const sendAllToFd = common.sendAllToFd;
 
     /// Write length-prefixed frame using writev() for scatter-gather I/O.
-    /// NOTE: This function is duplicated in client.zig. Consider extracting to common.zig.
+    /// Extracted to common.zig to eliminate duplication with client.zig.
     fn writeFrameLocked(self: *TunnelConnection, payload: []const u8) !void {
-        var header: [4]u8 = undefined;
-        std.mem.writeInt(u32, header[0..4], @intCast(payload.len), .big);
-
-        var iovecs = [_]posix.iovec_const{
-            posix.iovec_const{ .base = header[0..].ptr, .len = header.len },
-            posix.iovec_const{ .base = payload.ptr, .len = payload.len },
-        };
-
-        var index: usize = 0;
-        while (index < iovecs.len) {
-            const written = posix.writev(self.tunnel_fd, iovecs[index..]) catch |err| switch (err) {
-                error.WouldBlock => continue,
-                else => return err,
-            };
-            if (written == 0) return error.ConnectionClosed;
-
-            var remaining = written;
-            var current = index;
-            while (remaining > 0 and current < iovecs.len) {
-                if (remaining >= iovecs[current].len) {
-                    remaining -= iovecs[current].len;
-                    current += 1;
-                } else {
-                    iovecs[current].base += remaining;
-                    iovecs[current].len -= remaining;
-                    remaining = 0;
-                }
-            }
-            index = current;
-        }
+        return common.writeFrameLocked(self.tunnel_fd, payload);
     }
 
     /// Encrypt a message payload and send it with frame length prefix.
@@ -966,22 +1190,24 @@ const TunnelConnection = struct {
             thread.join();
         }
 
-        // Stop all streams
-        self.streams_mutex.lock();
-        var it = self.streams.valueIterator();
-        while (it.next()) |stream| {
-            stream.*.stop();
-        }
-        self.streams_mutex.unlock();
-
-        // Wait for streams and destroy
-        self.streams_mutex.lock();
-        var it2 = self.streams.valueIterator();
-        while (it2.next()) |stream| {
-            stream.*.destroy();
+        // Stop and release all streams without holding the mutex during blocking calls
+        while (true) {
+            self.streams_mutex.lock();
+            var iter = self.streams.iterator();
+            const entry = iter.next();
+            if (entry) |e| {
+                const key_copy = e.key_ptr.*; // copy to avoid invalid pointer after remove
+                const stream_ptr = e.value_ptr.*;
+                _ = self.streams.remove(key_copy);
+                self.streams_mutex.unlock();
+                stream_ptr.stop();
+                stream_ptr.releaseRef(); // drop map reference
+            } else {
+                self.streams_mutex.unlock();
+                break;
+            }
         }
         self.streams.deinit();
-        self.streams_mutex.unlock();
 
         if (self.udp_forwarder) |forwarder| {
             forwarder.stop();
@@ -1079,7 +1305,8 @@ pub fn main() !void {
     defer cfg.deinit();
     const port = cfg.port;
 
-    if (std.ascii.eqlIgnoreCase(cfg.cipher, "none")) {
+    const canonical_cipher = config.canonicalCipher(&cfg);
+    if (std.mem.eql(u8, canonical_cipher, "none")) {
         std.debug.print("[WARN] Server encryption disabled; relying solely on tokens for authentication.\n", .{});
     } else if (cfg.psk.len == 0) {
         std.debug.print("[WARN] Server PSK is empty; clients will fail to handshake.\n", .{});
@@ -1096,9 +1323,9 @@ pub fn main() !void {
         }
     }
 
-    if (default_token_required and cfg.default_token.len == 0) {
+    if (default_token_required and cfg.token.len == 0) {
         std.debug.print("[WARN] Server default token is empty; unauthorized clients may connect.\n", .{});
-    } else if (cfg.default_token.len > 0 and std.mem.eql(u8, cfg.default_token, config.DEFAULT_TOKEN)) {
+    } else if (cfg.token.len > 0 and std.mem.eql(u8, cfg.token, config.DEFAULT_TOKEN)) {
         std.debug.print("[WARN] Server is using the placeholder token '{s}'. Change this before deployment.\n", .{config.DEFAULT_TOKEN});
     }
 
@@ -1106,7 +1333,7 @@ pub fn main() !void {
     std.debug.print("====================================\n\n", .{});
     std.debug.print("[CONFIG] Port: {}\n", .{port});
     std.debug.print("[CONFIG] Mode: Blocking I/O + Threads\n", .{});
-    std.debug.print("[CONFIG] Hot Reload: Enabled (send SIGHUP to reload)\n\n", .{});
+    std.debug.print("[CONFIG] Hot Reload: Disabled (restart floos to apply configuration changes)\n\n", .{});
 
     // Register signal handlers (POSIX only)
     if (@hasDecl(posix, "Sigaction") and @hasDecl(posix, "sigaction")) {
@@ -1122,19 +1349,28 @@ pub fn main() !void {
         if (@hasDecl(posix.SIG, "USR1")) {
             posix.sigaction(posix.SIG.USR1, &sig_action, null);
         }
+        if (@hasDecl(posix.SIG, "PIPE")) {
+            const ignore = posix.Sigaction{
+                .handler = .{ .handler = posix.SIG.IGN },
+                .mask = std.mem.zeroes(posix.sigset_t),
+                .flags = 0,
+            };
+            posix.sigaction(posix.SIG.PIPE, &ignore, null);
+        }
     }
 
     // Create listen socket
-    const listen_fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    const listen_addr = try resolveHostPort(cfg.bind, port);
+    const listen_fd = try posix.socket(listen_addr.any.family, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
     defer posix.close(listen_fd);
 
     try posix.setsockopt(listen_fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, &std.mem.toBytes(@as(c_int, 1)));
 
-    const address = try std.net.Address.parseIp4("0.0.0.0", port);
-    try posix.bind(listen_fd, &address.any, address.getOsSockLen());
-    try posix.listen(listen_fd, 128);
+    try posix.bind(listen_fd, &listen_addr.any, listen_addr.getOsSockLen());
+    try posix.listen(listen_fd, common.LISTEN_BACKLOG);
 
-    std.debug.print("[SERVER] Listening on 0.0.0.0:{}\n", .{port});
+    var addr_buf: [64]u8 = undefined;
+    std.debug.print("[SERVER] Listening on {s}\n", .{formatAddress(listen_addr, &addr_buf)});
     std.debug.print("[READY] Server ready. Press Ctrl+C to stop.\n\n", .{});
 
     // Generate persistent static keypair for Noise XX authentication
@@ -1145,7 +1381,12 @@ pub fn main() !void {
         thread: std.Thread,
     };
     var connections = std.ArrayListUnmanaged(ConnectionEntry){};
+    var reverse_listeners = std.ArrayListUnmanaged(*ReverseListener){};
+    var reverse_listeners_conn: ?*TunnelConnection = null;
     defer {
+        stopAllReverseListeners(&reverse_listeners);
+        reverse_listeners.deinit(allocator);
+
         // Stop all connections
         for (connections.items) |entry| {
             entry.conn.running.store(false, .release);
@@ -1162,51 +1403,19 @@ pub fn main() !void {
         connections.deinit(allocator);
     }
 
-    // Track reverse service listener threads
-    var reverse_listener_threads = std.ArrayListUnmanaged(std.Thread){};
-    defer {
-        // Threads will exit when shutdown_flag is set
-        for (reverse_listener_threads.items) |thread| {
-            thread.join();
-        }
-        reverse_listener_threads.deinit(allocator);
-    }
-
     // Accept loop
     while (!shutdown_flag.load(.acquire)) {
-        // Check for config reload request
-        if (reload_config_flag.load(.acquire)) {
-            reload_config_flag.store(false, .release);
-
-            std.debug.print("[RELOAD] Reloading configuration from {s}...\n", .{config_path_global});
-
-            // Reload config file
-            const new_cfg = config.ServerConfig.loadFromFile(allocator, config_path_global) catch |err| {
-                std.debug.print("[RELOAD] Failed to reload config: {} - keeping current config\n", .{err});
-                continue;
-            };
-
-            // Update config (new connections will use new settings)
-            cfg.deinit();
-            cfg = new_cfg;
-            applyServerOverrides(&cfg, &cli_opts);
-
-            std.debug.print("[RELOAD] Configuration reloaded successfully!\n", .{});
-            std.debug.print("[RELOAD] Heartbeat interval: {}s\n", .{cfg.heartbeat_interval_seconds});
-            std.debug.print("[RELOAD] TCP tuning: nodelay={} keepalive={}\n", .{ cfg.tcp_nodelay, cfg.tcp_keepalive });
-            std.debug.print("[RELOAD] Existing tunnels will be closed so new policy takes effect.\n", .{});
-
-            for (connections.items) |entry| {
-                entry.conn.running.store(false, .release);
-                posix.shutdown(entry.conn.tunnel_fd, .recv) catch {};
-            }
-        }
-
         // Reap completed connections
         var idx: usize = 0;
         while (idx < connections.items.len) {
             const entry = connections.items[idx];
             if (!entry.conn.running.load(.acquire)) {
+                if (reverse_listeners_conn) |active_conn| {
+                    if (active_conn == entry.conn) {
+                        stopAllReverseListeners(&reverse_listeners);
+                        reverse_listeners_conn = null;
+                    }
+                }
                 entry.thread.join();
                 entry.conn.destroy();
                 _ = connections.swapRemove(idx);
@@ -1229,8 +1438,15 @@ pub fn main() !void {
         };
 
         std.debug.print("[SERVER] Accepted tunnel connection: fd={}\n", .{tunnel_fd});
-        tuneSocketBuffers(tunnel_fd, cfg.socket_buffer_size);
-        applyTcpOptions(tunnel_fd, tcpOptionsFromConfig(&cfg));
+        tuneSocketBuffers(tunnel_fd, cfg.advanced.socket_buffer_size);
+        const tcp_options = common.TcpOptions{
+            .nodelay = cfg.advanced.tcp_nodelay,
+            .keepalive = cfg.advanced.tcp_keepalive,
+            .keepalive_idle = cfg.advanced.tcp_keepalive_idle,
+            .keepalive_interval = cfg.advanced.tcp_keepalive_interval,
+            .keepalive_count = cfg.advanced.tcp_keepalive_count,
+        };
+        applyTcpOptions(tunnel_fd, tcp_options);
 
         // Create tunnel connection (shares static identity across all connections)
         const tunnel_conn = TunnelConnection.create(allocator, tunnel_fd, &cfg, static_keypair) catch |err| {
@@ -1241,7 +1457,7 @@ pub fn main() !void {
 
         // Spawn thread for this connection
         const thread = try std.Thread.spawn(.{
-            .stack_size = 512 * 1024, // 512KB stack (sufficient for 256KB buffer + overhead)
+            .stack_size = common.TUNNEL_THREAD_STACK,
         }, tunnelConnectionThread, .{tunnel_conn});
 
         connections.append(allocator, .{ .conn = tunnel_conn, .thread = thread }) catch |err| {
@@ -1253,42 +1469,32 @@ pub fn main() !void {
             continue;
         };
 
-        // Start reverse service listeners for this tunnel connection
-        var reverse_iter = cfg.services.valueIterator();
-        while (reverse_iter.next()) |service| {
-            if (service.mode == .reverse) {
-                std.debug.print("[SERVER] Starting reverse service listener for '{s}' (id={}, port={})\n", .{
-                    service.name,
-                    service.service_id,
-                    service.local_port,
-                });
+        // (Re)bind reverse service listeners to this tunnel if reverse mode is configured
+        if (cfg.reverse_services.count() > 0) {
+            if (reverse_listeners_conn) |_| {
+                stopAllReverseListeners(&reverse_listeners);
+                reverse_listeners_conn = null;
+            }
 
-                const ctx = allocator.create(ReverseServiceListenerContext) catch |err| {
-                    std.debug.print("[SERVER] Failed to allocate reverse listener context: {}\n", .{err});
+            std.debug.print("[REVERSE] Starting {} reverse services on new tunnel...\n", .{cfg.reverse_services.count()});
+            var rev_iter = cfg.reverse_services.valueIterator();
+            while (rev_iter.next()) |service| {
+                const listener = ReverseListener.create(allocator, service.*, tunnel_conn) catch |err| {
+                    std.debug.print("[REVERSE] Failed to create listener for service '{s}': {}\n", .{ service.name, err });
                     continue;
                 };
 
-                ctx.* = .{
-                    .allocator = allocator,
-                    .service_id = service.service_id,
-                    .listen_port = service.local_port,
-                    .target_host = service.target_host,
-                    .target_port = service.target_port,
-                    .token = service.token,
-                    .tunnel_conn = tunnel_conn,
-                    .next_stream_id = std.atomic.Value(u32).init(1),
-                };
-
-                const listener_thread = std.Thread.spawn(.{}, reverseServiceListener, .{ctx}) catch |err| {
-                    std.debug.print("[SERVER] Failed to spawn reverse listener thread: {}\n", .{err});
-                    allocator.destroy(ctx);
+                reverse_listeners.append(allocator, listener) catch |err| {
+                    std.debug.print("[REVERSE] Failed to track listener: {}\n", .{err});
+                    listener.stop();
+                    listener.destroy();
                     continue;
                 };
+            }
 
-                reverse_listener_threads.append(allocator, listener_thread) catch |err| {
-                    std.debug.print("[SERVER] Failed to track reverse listener thread: {}\n", .{err});
-                    // Thread is already running, let it continue
-                };
+            if (reverse_listeners.items.len > 0) {
+                reverse_listeners_conn = tunnel_conn;
+                std.debug.print("[REVERSE] Reverse services bound to current tunnel connection\n", .{});
             }
         }
     }
@@ -1305,10 +1511,8 @@ fn tunnelConnectionThread(conn: *TunnelConnection) void {
 const ReverseServiceListenerContext = struct {
     allocator: std.mem.Allocator,
     service_id: tunnel.ServiceId,
+    listen_host: []const u8,
     listen_port: u16,
-    target_host: []const u8,
-    target_port: u16,
-    token: []const u8,
     tunnel_conn: *TunnelConnection,
     next_stream_id: std.atomic.Value(u32),
 };
@@ -1317,10 +1521,18 @@ const ReverseServiceListenerContext = struct {
 /// Listens on a public port, sends CONNECT to client when users connect
 fn reverseServiceListener(ctx_ptr: *anyopaque) void {
     const ctx: *ReverseServiceListenerContext = @ptrCast(@alignCast(ctx_ptr));
-    defer ctx.allocator.destroy(ctx);
+    defer {
+        ctx.allocator.free(ctx.listen_host);
+        ctx.allocator.destroy(ctx);
+    }
 
     // Create listener socket
-    const listen_fd = posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch |err| {
+    const local_addr = resolveHostPort(ctx.listen_host, ctx.listen_port) catch |err| {
+        std.debug.print("[REVERSE-SERVICE] Failed to parse address for service_id={}: {}\n", .{ ctx.service_id, err });
+        return;
+    };
+
+    const listen_fd = posix.socket(local_addr.any.family, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch |err| {
         std.debug.print("[REVERSE-SERVICE] Failed to create socket for service_id={}: {}\n", .{ ctx.service_id, err });
         return;
     };
@@ -1328,22 +1540,17 @@ fn reverseServiceListener(ctx_ptr: *anyopaque) void {
 
     posix.setsockopt(listen_fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, &std.mem.toBytes(@as(c_int, 1))) catch {};
 
-    const local_addr = std.net.Address.parseIp4("0.0.0.0", ctx.listen_port) catch |err| {
-        std.debug.print("[REVERSE-SERVICE] Failed to parse address for service_id={}: {}\n", .{ ctx.service_id, err });
-        return;
-    };
-
     posix.bind(listen_fd, &local_addr.any, local_addr.getOsSockLen()) catch |err| {
         std.debug.print("[REVERSE-SERVICE] Failed to bind service_id={} on port {}: {}\n", .{ ctx.service_id, ctx.listen_port, err });
         return;
     };
 
-    posix.listen(listen_fd, 128) catch |err| {
+    posix.listen(listen_fd, common.LISTEN_BACKLOG) catch |err| {
         std.debug.print("[REVERSE-SERVICE] Failed to listen for service_id={}: {}\n", .{ ctx.service_id, err });
         return;
     };
 
-    std.debug.print("[REVERSE-SERVICE] Listening on 0.0.0.0:{} (service_id={}, reverse mode)\n", .{ ctx.listen_port, ctx.service_id });
+    std.debug.print("[REVERSE-SERVICE] Listening on {s}:{} (service_id={}, reverse mode)\n", .{ ctx.listen_host, ctx.listen_port, ctx.service_id });
 
     // Accept loop
     while (!shutdown_flag.load(.acquire) and ctx.tunnel_conn.running.load(.acquire)) {
@@ -1372,9 +1579,7 @@ fn reverseServiceListener(ctx_ptr: *anyopaque) void {
         const connect_msg = tunnel.ConnectMsg{
             .service_id = ctx.service_id,
             .stream_id = stream_id,
-            .target_host = ctx.target_host,
-            .target_port = ctx.target_port,
-            .token = ctx.token,
+            .token = "",
         };
 
         var encode_buf: [512]u8 = undefined;
@@ -1400,11 +1605,12 @@ fn reverseServiceListener(ctx_ptr: *anyopaque) void {
 
         ctx.tunnel_conn.streams_mutex.lock();
         const key = StreamKey{ .service_id = ctx.service_id, .stream_id = stream_id };
+        stream.acquireRef();
         ctx.tunnel_conn.streams.put(key, stream) catch |err| {
             ctx.tunnel_conn.streams_mutex.unlock();
             std.debug.print("[REVERSE-SERVICE] Failed to register stream: {}\n", .{err});
+            stream.releaseRef(); // undo map ref
             stream.stop();
-            stream.destroy();
             continue;
         };
         ctx.tunnel_conn.streams_mutex.unlock();

@@ -6,10 +6,10 @@ class Floo < Formula
 
   if Hardware::CPU.arm?
     url "https://github.com/YUX/floo/releases/download/v0.1.2/floo-aarch64-macos-m1.tar.gz"
-    sha256 "TO_BE_CALCULATED" # Update this after release
+    sha256 "ade1612e80eb7ea3ea2327d1fa791ae56435c2fbea0ce0aaa8fbb2b0adca6ab6"
   else
     url "https://github.com/YUX/floo/releases/download/v0.1.2/floo-x86_64-macos-haswell.tar.gz"
-    sha256 "TO_BE_CALCULATED" # Update this after release
+    sha256 "91853bd55977976f7934b20865cd1f3459a644abe966f208f08421f6300af29d"
   end
 
   def install

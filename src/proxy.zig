@@ -1,5 +1,9 @@
 const std = @import("std");
 const posix = std.posix;
+const common = @import("common.zig");
+
+const sendAllToFd = common.sendAllToFd;
+const recvAllFromFd = common.recvAllFromFd;
 
 /// Proxy type for client connections
 pub const ProxyType = enum {
@@ -50,24 +54,35 @@ pub const ProxyConfig = struct {
         var username: []const u8 = "";
         var password: []const u8 = "";
         var host_port = remainder;
+        var username_buf: ?[]const u8 = null;
+        var password_buf: ?[]const u8 = null;
+        var host_buf: ?[]const u8 = null;
+        errdefer {
+            if (username_buf) |buf| allocator.free(buf);
+            if (password_buf) |buf| allocator.free(buf);
+            if (host_buf) |buf| allocator.free(buf);
+        }
 
         if (std.mem.indexOfScalar(u8, remainder, '@')) |at_idx| {
             const auth_part = remainder[0..at_idx];
             host_port = remainder[at_idx + 1 ..];
 
             if (std.mem.indexOfScalar(u8, auth_part, ':')) |colon_idx| {
-                username = try allocator.dupe(u8, auth_part[0..colon_idx]);
-                password = try allocator.dupe(u8, auth_part[colon_idx + 1 ..]);
+                username_buf = try allocator.dupe(u8, auth_part[0..colon_idx]);
+                password_buf = try allocator.dupe(u8, auth_part[colon_idx + 1 ..]);
             } else {
-                username = try allocator.dupe(u8, auth_part);
+                username_buf = try allocator.dupe(u8, auth_part);
             }
+            if (username_buf) |buf| username = buf;
+            if (password_buf) |buf| password = buf;
         }
 
         // Parse host:port
         const colon_idx = std.mem.lastIndexOfScalar(u8, host_port, ':') orelse return error.InvalidProxyUrl;
-        const host = try allocator.dupe(u8, host_port[0..colon_idx]);
+        host_buf = try allocator.dupe(u8, host_port[0..colon_idx]);
         const port_str = host_port[colon_idx + 1 ..];
         const port = std.fmt.parseInt(u16, port_str, 10) catch return error.InvalidProxyUrl;
+        const host = host_buf.?;
 
         return ProxyConfig{
             .proxy_type = proxy_type,
@@ -132,11 +147,11 @@ pub fn connectViaSocks5(
         break :blk greeting_buf[0..3];
     };
 
-    try sendAll(fd, greeting);
+    try sendAllToFd(fd, greeting);
 
     // Read authentication method choice
     var method_response: [2]u8 = undefined;
-    try recvAll(fd, &method_response);
+    try recvAllFromFd(fd, &method_response);
 
     if (method_response[0] != 0x05) return error.InvalidSocks5Response;
     const chosen_method = method_response[1];
@@ -164,11 +179,11 @@ pub fn connectViaSocks5(
         @memcpy(auth_buf[offset .. offset + proxy_password.len], proxy_password);
         offset += proxy_password.len;
 
-        try sendAll(fd, auth_buf[0..offset]);
+        try sendAllToFd(fd, auth_buf[0..offset]);
 
         // Read auth response
         var auth_response: [2]u8 = undefined;
-        try recvAll(fd, &auth_response);
+        try recvAllFromFd(fd, &auth_response);
 
         if (auth_response[0] != 0x01 or auth_response[1] != 0x00) {
             return error.Socks5AuthFailed;
@@ -218,11 +233,11 @@ pub fn connectViaSocks5(
     std.mem.writeInt(u16, request_buf[req_offset..][0..2], target_port, .big);
     req_offset += 2;
 
-    try sendAll(fd, request_buf[0..req_offset]);
+    try sendAllToFd(fd, request_buf[0..req_offset]);
 
     // Read CONNECT response
     var response_header: [4]u8 = undefined;
-    try recvAll(fd, &response_header);
+    try recvAllFromFd(fd, &response_header);
 
     if (response_header[0] != 0x05) return error.InvalidSocks5Response;
     if (response_header[1] != 0x00) {
@@ -247,14 +262,14 @@ pub fn connectViaSocks5(
         SOCKS5_ADDR_IPV6 => 16,
         SOCKS5_ADDR_DOMAIN => blk: {
             var len_buf: [1]u8 = undefined;
-            try recvAll(fd, &len_buf);
+            try recvAllFromFd(fd, &len_buf);
             break :blk len_buf[0];
         },
         else => return error.InvalidSocks5Response,
     };
 
-    try recvAll(fd, discard_buf[0..addr_len]);
-    try recvAll(fd, discard_buf[0..2]); // Port
+    try recvAllFromFd(fd, discard_buf[0..addr_len]);
+    try recvAllFromFd(fd, discard_buf[0..2]); // Port
 
     // Connection established through proxy
     return fd;
@@ -327,7 +342,7 @@ pub fn connectViaHttpConnect(
     offset += 2;
 
     // Send CONNECT request
-    try sendAll(fd, request_buf[0..offset]);
+    try sendAllToFd(fd, request_buf[0..offset]);
 
     // Read response
     var response_buf: [4096]u8 = undefined;
@@ -374,26 +389,6 @@ pub fn connectViaHttpConnect(
 
     // Connection established through proxy
     return fd;
-}
-
-/// Helper: send all data to socket
-fn sendAll(fd: posix.fd_t, data: []const u8) !void {
-    var offset: usize = 0;
-    while (offset < data.len) {
-        const n = try posix.send(fd, data[offset..], 0);
-        if (n == 0) return error.ConnectionClosed;
-        offset += n;
-    }
-}
-
-/// Helper: receive exact amount of data
-fn recvAll(fd: posix.fd_t, buffer: []u8) !void {
-    var offset: usize = 0;
-    while (offset < buffer.len) {
-        const n = posix.recv(fd, buffer[offset..], 0) catch |err| return err;
-        if (n == 0) return error.ConnectionClosed;
-        offset += n;
-    }
 }
 
 /// Connect to target, optionally through a proxy

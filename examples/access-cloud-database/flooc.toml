@@ -1,12 +1,12 @@
-# Client - Your Laptop
-local_host = "127.0.0.1"
-local_port = 5432
-remote_host = "YOUR_CLOUD_IP"
-remote_port = 8443
-target_host = "127.0.0.1"
-target_port = 5432
-cipher = "aegis128l"
-psk = "CHANGE-ME"
-default_token = "CHANGE-ME"
-service_id = 1
+server = "your-database-server.com:8443"
+cipher = "aes256gcm"
+psk = "your-secure-database-key"
+token = "database-access-token"
+
+[services]
+postgres = "127.0.0.1:5432"
+
+[advanced]
 num_tunnels = 2
+reconnect_enabled = true
+heartbeat_timeout_seconds = 120

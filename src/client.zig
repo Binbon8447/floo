@@ -11,10 +11,12 @@ const common = @import("common.zig");
 const proxy = @import("proxy.zig");
 
 const tracePrint = common.tracePrint;
-const tcpOptionsFromConfig = common.tcpOptionsFromConfig;
+const tcpOptionsFromSettings = common.tcpOptionsFromSettings;
 const tuneSocketBuffers = common.tuneSocketBuffers;
 const applyTcpOptions = common.applyTcpOptions;
 const TcpOptions = common.TcpOptions;
+const formatAddress = common.formatAddress;
+const resolveHostPort = common.resolveHostPort;
 
 const CheckStatus = diagnostics.CheckStatus;
 
@@ -24,7 +26,6 @@ const enable_listener_trace = false;
 
 var global_allocator: std.mem.Allocator = undefined;
 var shutdown_flag: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
-var reload_config_flag: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 var config_path_global: []const u8 = undefined; // Store config path for reload
 var encrypt_total_ns: std.atomic.Value(u64) = std.atomic.Value(u64).init(0);
 var encrypt_calls: std.atomic.Value(u64) = std.atomic.Value(u64).init(0);
@@ -38,13 +39,10 @@ const CliOptions = struct {
     local_port_override: ?u16 = null,
     remote_host_override: ?[]const u8 = null,
     remote_port_override: ?u16 = null,
-    target_host_override: ?[]const u8 = null,
-    target_port_override: ?u16 = null,
     proxy_url_override: ?[]const u8 = null,
 
     fn deinit(self: *CliOptions, allocator: std.mem.Allocator) void {
         if (self.remote_host_override) |host| allocator.free(host);
-        if (self.target_host_override) |host| allocator.free(host);
         if (self.proxy_url_override) |url| allocator.free(url);
     }
 };
@@ -64,7 +62,6 @@ const CLIENT_USAGE =
     \\      --ping                Measure handshake latency to the remote server and exit
     \\  -l, --local PORT          Override local listener port
     \\  -r, --remote HOST[:PORT]  Override remote server address
-    \\  -t, --target HOST[:PORT]  Override target application address
     \\  -x, --proxy URL           Connect via proxy (socks5://host:port or http://host:port)
     \\  config_path               Optional path to flooc.toml (defaults to ./flooc.toml)
     \\Examples:
@@ -181,14 +178,6 @@ fn parseClientArgs(allocator: std.mem.Allocator, args_list: [][:0]u8, ctx: *Pars
             idx += 1;
             const value = std.mem.sliceTo(args_list[idx], 0);
             try parseHostPortOption(allocator, value, &opts.remote_host_override, &opts.remote_port_override, ctx, arg);
-        } else if (std.mem.eql(u8, arg, "--target") or std.mem.eql(u8, arg, "-t")) {
-            if (idx + 1 >= args_list.len) {
-                ctx.arg = arg;
-                return ParseError.MissingValue;
-            }
-            idx += 1;
-            const value = std.mem.sliceTo(args_list[idx], 0);
-            try parseHostPortOption(allocator, value, &opts.target_host_override, &opts.target_port_override, ctx, arg);
         } else if (std.mem.eql(u8, arg, "--proxy") or std.mem.eql(u8, arg, "-x")) {
             if (idx + 1 >= args_list.len) {
                 ctx.arg = arg;
@@ -214,28 +203,35 @@ fn parseClientArgs(allocator: std.mem.Allocator, args_list: [][:0]u8, ctx: *Pars
 }
 
 fn applyClientOverrides(allocator: std.mem.Allocator, cfg: *config.ClientConfig, opts: *CliOptions) void {
+    // Handle local port override for default service
     if (opts.local_port_override) |port| {
-        cfg.local_port = port;
+        if (cfg.default_service) |service_name| {
+            if (cfg.services.getPtr(service_name)) |service| {
+                service.port = port;
+            }
+        }
     }
-    if (opts.remote_port_override) |port| {
-        cfg.remote_port = port;
+
+    // Handle remote host/port override by rebuilding server string
+    if (opts.remote_host_override != null or opts.remote_port_override != null) {
+        const current_host = cfg.getServerHost() catch "localhost";
+        const current_port = cfg.getServerPort() catch 8443;
+
+        const new_host = opts.remote_host_override orelse current_host;
+        const new_port = opts.remote_port_override orelse current_port;
+
+        const new_server = std.fmt.allocPrint(allocator, "{s}:{d}", .{ new_host, new_port }) catch return;
+        allocator.free(cfg.server);
+        cfg.server = new_server;
+
+        if (opts.remote_host_override) |_| {
+            opts.remote_host_override = null;
+        }
     }
-    if (opts.remote_host_override) |host| {
-        allocator.free(cfg.remote_host);
-        cfg.remote_host = host;
-        opts.remote_host_override = null;
-    }
-    if (opts.target_port_override) |port| {
-        cfg.target_port = port;
-    }
-    if (opts.target_host_override) |host| {
-        allocator.free(cfg.target_host);
-        cfg.target_host = host;
-        opts.target_host_override = null;
-    }
+
     if (opts.proxy_url_override) |url| {
-        allocator.free(cfg.proxy_url);
-        cfg.proxy_url = url;
+        allocator.free(cfg.advanced.proxy_url);
+        cfg.advanced.proxy_url = url;
         opts.proxy_url_override = null;
     }
 }
@@ -257,36 +253,92 @@ const PingResult = struct {
 fn performClientPing(cfg: *const config.ClientConfig) !PingResult {
     const connect_start = std.time.nanoTimestamp();
 
+    const remote_host = try cfg.getServerHost();
+    const remote_port = try cfg.getServerPort();
+
     // Connect through proxy if configured
     var proxy_cfg_opt: ?proxy.ProxyConfig = null;
-    if (cfg.proxy_url.len > 0) {
-        proxy_cfg_opt = try proxy.ProxyConfig.parseUrl(global_allocator, cfg.proxy_url);
+    if (cfg.advanced.proxy_url.len > 0) {
+        proxy_cfg_opt = try proxy.ProxyConfig.parseUrl(global_allocator, cfg.advanced.proxy_url);
     }
     defer if (proxy_cfg_opt) |*p| p.deinit(global_allocator);
 
     const fd = try proxy.connectWithProxy(
         global_allocator,
         proxy_cfg_opt,
-        cfg.remote_host,
-        cfg.remote_port,
+        remote_host,
+        remote_port,
     );
     errdefer posix.close(fd);
 
     const connect_done = std.time.nanoTimestamp();
 
+    const canonical_cipher = config.canonicalCipher(cfg);
     var handshake_ns: i128 = 0;
-    if (!std.ascii.eqlIgnoreCase(cfg.cipher, "none")) {
-        const cipher_type = noise.CipherType.fromString(cfg.cipher) catch .chacha20poly1305;
+    if (!std.mem.eql(u8, canonical_cipher, "none")) {
+        const cipher_type = noise.CipherType.fromString(canonical_cipher) catch return error.InvalidCipher;
         const static_keypair = std.crypto.dh.X25519.KeyPair.generate();
         const handshake_start = std.time.nanoTimestamp();
-        _ = noise.noiseXXHandshake(fd, cipher_type, true, static_keypair, cfg.psk) catch |err| {
+        const handshake = noise.noiseXXHandshake(fd, cipher_type, true, static_keypair, cfg.psk) catch |err| {
             return err;
         };
         const handshake_done = std.time.nanoTimestamp();
         handshake_ns = handshake_done - handshake_start;
-        const total_ns = handshake_done - connect_start;
+
+        // Version check (using handshake ciphers)
+        var send_cipher = handshake.send_cipher;
+        var recv_cipher = handshake.recv_cipher;
+
+        // Send our version
+        const version_msg = tunnel.VersionMsg{ .version = build_options.version };
+        var version_buf: [64]u8 = undefined;
+        const version_len = try version_msg.encodeInto(&version_buf);
+
+        var encrypted_version: [128]u8 = undefined;
+        const encrypted_len = version_len + noise.TAG_LEN;
+        try send_cipher.encrypt(version_buf[0..version_len], encrypted_version[0..encrypted_len]);
+
+        // Write frame directly (no mutex during handshake)
+        var frame_header: [4]u8 = undefined;
+        std.mem.writeInt(u32, &frame_header, @intCast(encrypted_len), .big);
+        try common.sendAllToFd(fd, &frame_header);
+        try common.sendAllToFd(fd, encrypted_version[0..encrypted_len]);
+
+        // Receive server version
+        var frame_buf: [256]u8 = undefined;
+        var frame_offset: usize = 0;
+
+        while (frame_offset < 4) {
+            const n = try posix.recv(fd, frame_buf[frame_offset..], 0);
+            if (n == 0) return error.ConnectionClosed;
+            frame_offset += n;
+        }
+
+        const frame_len = std.mem.readInt(u32, frame_buf[0..4], .big);
+        if (frame_len > frame_buf.len - 4) return error.FrameTooLarge;
+
+        while (frame_offset < 4 + frame_len) {
+            const n = try posix.recv(fd, frame_buf[frame_offset..], 0);
+            if (n == 0) return error.ConnectionClosed;
+            frame_offset += n;
+        }
+
+        var decrypted_version: [128]u8 = undefined;
+        const decrypted_len = frame_len - noise.TAG_LEN;
+        try recv_cipher.decrypt(frame_buf[4 .. 4 + frame_len], decrypted_version[0..decrypted_len]);
+
+        const server_version_msg = try tunnel.VersionMsg.decode(decrypted_version[0..decrypted_len], global_allocator);
+        defer global_allocator.free(server_version_msg.version);
+
+        if (!std.mem.eql(u8, server_version_msg.version, build_options.version)) {
+            std.debug.print("[PING] Version mismatch: client={s}, server={s}\n", .{ build_options.version, server_version_msg.version });
+            posix.close(fd);
+            return error.VersionMismatch;
+        }
+
+        const total_ns = std.time.nanoTimestamp() - connect_start;
         posix.close(fd);
-        const remote_addr = try std.net.Address.resolveIp(cfg.remote_host, cfg.remote_port);
+        const remote_addr = try std.net.Address.resolveIp(remote_host, remote_port);
         return .{
             .remote_addr = remote_addr,
             .connect_ns = connect_done - connect_start,
@@ -295,7 +347,7 @@ fn performClientPing(cfg: *const config.ClientConfig) !PingResult {
         };
     } else {
         posix.close(fd);
-        const remote_addr = try std.net.Address.resolveIp(cfg.remote_host, cfg.remote_port);
+        const remote_addr = try std.net.Address.resolveIp(remote_host, remote_port);
         return .{
             .remote_addr = remote_addr,
             .connect_ns = connect_done - connect_start,
@@ -305,17 +357,30 @@ fn performClientPing(cfg: *const config.ClientConfig) !PingResult {
     }
 }
 
-/// Format network address for display (IPv4/IPv6).
-/// NOTE: This function is duplicated in server.zig. Consider extracting to common.zig.
-fn formatAddress(addr: std.net.Address, buf: []u8) []const u8 {
-    return std.fmt.bufPrint(buf, "{f}", .{addr}) catch "unavailable";
+const ServiceBinding = struct {
+    host: []const u8,
+    port: u16,
+    token: []const u8,
+};
+
+fn getServiceBinding(cfg: *const config.ClientConfig, service_id: tunnel.ServiceId) !ServiceBinding {
+    if (cfg.getServiceById(service_id)) |svc| {
+        return .{
+            .host = svc.address,
+            .port = svc.port,
+            .token = if (svc.token.len > 0) svc.token else cfg.token,
+        };
+    }
+    return error.UnknownService;
 }
 
 fn runClientPing(allocator: std.mem.Allocator, opts: *CliOptions) !bool {
     var cfg = try loadClientConfigWithOverrides(allocator, opts);
     defer cfg.deinit();
 
-    std.debug.print("Pinging {s}:{d}...\n", .{ cfg.remote_host, cfg.remote_port });
+    const host = try cfg.getServerHost();
+    const port = try cfg.getServerPort();
+    std.debug.print("Pinging {s}:{d}...\n", .{ host, port });
     const result = performClientPing(&cfg) catch |err| {
         diagnostics.reportCheck(.fail, "Connection attempt failed: {}", .{err});
         return false;
@@ -329,8 +394,10 @@ fn runClientPing(allocator: std.mem.Allocator, opts: *CliOptions) !bool {
     const total_ms = @as(f64, @floatFromInt(result.total_ns)) / @as(f64, std.time.ns_per_ms);
 
     diagnostics.reportCheck(.ok, "Connected to {s}", .{addr_str});
+    const canonical_cipher = config.canonicalCipher(&cfg);
     if (result.handshake_ns > 0) {
-        diagnostics.reportCheck(.ok, "Handshake completed using cipher '{s}'", .{cfg.cipher});
+        diagnostics.reportCheck(.ok, "Handshake completed using cipher '{s}'", .{canonical_cipher});
+        diagnostics.reportCheck(.ok, "Version check passed: {s}", .{build_options.version});
         std.debug.print("    connect:  {d:.2} ms\n", .{connect_ms});
         std.debug.print("    handshake:{d:.2} ms\n", .{handshake_ms});
         std.debug.print("    total:    {d:.2} ms\n", .{total_ms});
@@ -364,39 +431,48 @@ fn runClientDoctor(allocator: std.mem.Allocator, opts: *CliOptions) !bool {
     var had_fail = false;
 
     diagnostics.reportCheck(.ok, "Configuration parsed (services: {})", .{cfg.services.count()});
+    diagnostics.reportCheck(.ok, "Client version: {s}", .{build_options.version});
     if (std.mem.eql(u8, cfg.psk, config.DEFAULT_PSK)) {
         diagnostics.reportCheck(.warn, "Using default PSK; replace with secret for production", .{});
     }
-    if (cfg.default_token.len == 0 or std.mem.eql(u8, cfg.default_token, config.DEFAULT_TOKEN)) {
+    if (cfg.token.len == 0 or std.mem.eql(u8, cfg.token, config.DEFAULT_TOKEN)) {
         diagnostics.reportCheck(.warn, "Default token is unset or placeholder; tighten authentication", .{});
     }
 
-    const remote_addr = std.net.Address.resolveIp(cfg.remote_host, cfg.remote_port) catch |err| {
-        diagnostics.reportCheck(.fail, "Unable to resolve remote {s}:{d}: {}", .{ cfg.remote_host, cfg.remote_port, err });
+    const remote_host = try cfg.getServerHost();
+    const remote_port = try cfg.getServerPort();
+    const remote_addr = std.net.Address.resolveIp(remote_host, remote_port) catch |err| {
+        diagnostics.reportCheck(.fail, "Unable to resolve remote {s}:{d}: {}", .{ remote_host, remote_port, err });
         return false;
     };
     var addr_buf: [64]u8 = undefined;
-    diagnostics.reportCheck(.ok, "Remote {s}:{d} resolves to {s}", .{ cfg.remote_host, cfg.remote_port, formatAddress(remote_addr, &addr_buf) });
+    diagnostics.reportCheck(.ok, "Remote {s}:{d} resolves to {s}", .{ remote_host, remote_port, formatAddress(remote_addr, &addr_buf) });
 
-    const local_fd_result = posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
-    if (local_fd_result) |local_fd| {
+    // Check local service ports
+    var service_iter = cfg.services.valueIterator();
+    while (service_iter.next()) |service| {
+        const local_addr = resolveHostPort(service.address, service.port) catch |err| {
+            diagnostics.reportCheck(.warn, "Failed to parse address for service '{s}': {}", .{ service.name, err });
+            continue;
+        };
+        const local_fd = posix.socket(local_addr.any.family, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch |err| {
+            diagnostics.reportCheck(.warn, "Failed to create socket for local port probe: {}", .{err});
+            continue;
+        };
         defer posix.close(local_fd);
         const reuse: c_int = 1;
         posix.setsockopt(local_fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, &std.mem.toBytes(reuse)) catch {};
-        const local_addr = try std.net.Address.parseIp4("127.0.0.1", cfg.local_port);
         const bind_result = posix.bind(local_fd, &local_addr.any, local_addr.getOsSockLen());
         if (bind_result) |_| {
-            diagnostics.reportCheck(.ok, "Local port {} available on 127.0.0.1", .{cfg.local_port});
+            diagnostics.reportCheck(.ok, "Local port {} available for service '{s}' on {s}", .{ service.port, service.name, service.address });
         } else |err| {
             if (err == error.AddressInUse) {
-                diagnostics.reportCheck(.warn, "Local port {} is already in use; another flooc instance might be running", .{cfg.local_port});
+                diagnostics.reportCheck(.warn, "Local port {} for service '{s}' is already in use", .{ service.port, service.name });
                 had_fail = true;
             } else {
-                diagnostics.reportCheck(.warn, "Unable to probe local port {}: {}", .{ cfg.local_port, err });
+                diagnostics.reportCheck(.warn, "Unable to probe local port {} for service '{s}': {}", .{ service.port, service.name, err });
             }
         }
-    } else |err| {
-        diagnostics.reportCheck(.warn, "Failed to create socket for local port probe: {}", .{err});
     }
 
     const ping_result = performClientPing(&cfg) catch |err| {
@@ -422,8 +498,7 @@ fn handleSignal(sig: c_int) callconv(.c) void {
         std.debug.print("\n[SHUTDOWN] Received interrupt, stopping client...\n", .{});
         shutdown_flag.store(true, .release);
     } else if (sig == posix.SIG.HUP) {
-        std.debug.print("\n[RELOAD] Received SIGHUP, reloading configuration...\n", .{});
-        reload_config_flag.store(true, .release);
+        std.debug.print("\n[INFO] Configuration reload via SIGHUP is currently disabled; restart flooc to apply changes.\n", .{});
     } else if (@hasDecl(posix.SIG, "USR1") and sig == posix.SIG.USR1) {
         diagnostics.flushEncryptStats("client", &encrypt_total_ns, &encrypt_calls);
     }
@@ -438,6 +513,8 @@ const LocalConnection = struct {
     thread: std.Thread,
     running: std.atomic.Value(bool),
     fd_closed: std.atomic.Value(bool), // Track if local_fd is closed
+    ref_count: std.atomic.Value(usize),
+    thread_joined: std.atomic.Value(bool),
 
     fn create(allocator: std.mem.Allocator, service_id: tunnel.ServiceId, stream_id: tunnel.StreamId, local_fd: posix.fd_t, tunnel_client: *TunnelClient) !*LocalConnection {
         const conn = try allocator.create(LocalConnection);
@@ -449,21 +526,54 @@ const LocalConnection = struct {
             .thread = undefined,
             .running = std.atomic.Value(bool).init(true),
             .fd_closed = std.atomic.Value(bool).init(false),
+            .ref_count = std.atomic.Value(usize).init(1),
+            .thread_joined = std.atomic.Value(bool).init(false),
         };
 
         // Spawn thread to handle local -> tunnel forwarding
         conn.thread = try std.Thread.spawn(.{
-            .stack_size = 256 * 1024, // 256KB stack (sufficient for 64KB buffer + overhead)
+            .stack_size = common.DEFAULT_THREAD_STACK,
         }, localThreadMain, .{conn});
 
         return conn;
     }
 
+    fn acquireRef(self: *LocalConnection) void {
+        _ = self.ref_count.fetchAdd(1, .acq_rel);
+    }
+
+    fn releaseRef(self: *LocalConnection) void {
+        const previous = self.ref_count.fetchSub(1, .acq_rel);
+        std.debug.assert(previous > 0);
+        if (previous == 1) {
+            self.destroyInternal();
+        }
+    }
+
+    fn destroyInternal(self: *LocalConnection) void {
+        global_allocator.destroy(self);
+    }
+
     fn localThreadMain(self: *LocalConnection) void {
-        var buf: [65536]u8 align(64) = undefined; // 64KB (optimal size)
+        var buf: [common.SOCKET_BUFFER_SIZE]u8 align(64) = undefined;
         var send_buf: [70016]u8 align(64) = undefined; // Buffer for framing + tag
 
         std.debug.print("[LOCAL {}] Thread started, reading from local fd={}\n", .{ self.stream_id, self.local_fd });
+
+        // Ensure we remove ourselves from the HashMap on exit
+        defer {
+            var released_map_ref = false;
+            self.tunnel.connections_mutex.lock();
+            if (self.tunnel.connections.remove(self.stream_id)) {
+                released_map_ref = true;
+            }
+            self.tunnel.connections_mutex.unlock();
+            if (released_map_ref) {
+                self.releaseRef(); // drop map-held ref
+            }
+            std.debug.print("[LOCAL {}] Removed from connections map\n", .{self.stream_id});
+            self.releaseRef(); // drop worker ref
+        }
 
         const message_header_len: usize = 7;
         while (self.running.load(.acquire)) {
@@ -483,7 +593,7 @@ const LocalConnection = struct {
                 var encode_buf: [16]u8 = undefined; // CLOSE is 7 bytes (type:1 + service_id:2 + stream_id:4)
                 const encoded_len = close_msg.encodeInto(&encode_buf) catch break;
                 self.tunnel.sendEncryptedMessage(encode_buf[0..encoded_len]) catch |err| {
-                    self.tunnel.handleSendFailure(err);
+                    std.debug.print("[LOCAL {}] Failed to send CLOSE: {}\n", .{ self.stream_id, err });
                 };
                 break; // EOF
             }
@@ -495,7 +605,6 @@ const LocalConnection = struct {
 
                 self.tunnel.sendPlainFrame(send_buf[0 .. message_header_len + n]) catch |err| {
                     std.debug.print("[LOCAL {}] send() error: {}\n", .{ self.stream_id, err });
-                    self.tunnel.handleSendFailure(err);
                     break;
                 };
                 continue;
@@ -506,13 +615,14 @@ const LocalConnection = struct {
             const encoded_len = data_msg.encodeInto(send_buf[0..]) catch break;
 
             self.tunnel.send_mutex.lock();
+            defer self.tunnel.send_mutex.unlock();
+
             const encrypted_len = encoded_len + noise.TAG_LEN;
 
             if (self.tunnel.send_cipher) |*cipher| {
                 const start_ns = std.time.nanoTimestamp();
                 cipher.encrypt(send_buf[0..encoded_len], send_buf[0..encrypted_len]) catch |err| {
                     std.debug.print("[LOCAL {}] Encryption error: {}\n", .{ self.stream_id, err });
-                    self.tunnel.send_mutex.unlock();
                     break;
                 };
                 const end_ns = std.time.nanoTimestamp();
@@ -521,17 +631,13 @@ const LocalConnection = struct {
                 _ = encrypt_calls.fetchAdd(1, .acq_rel);
             } else {
                 std.debug.print("[LOCAL {}] Missing send cipher, shutting down stream\n", .{self.stream_id});
-                self.tunnel.send_mutex.unlock();
                 break;
             }
 
             self.tunnel.writeFrameLocked(send_buf[0..encrypted_len]) catch |err| {
                 std.debug.print("[LOCAL {}] send() error: {}\n", .{ self.stream_id, err });
-                self.tunnel.handleSendFailure(err);
-                self.tunnel.send_mutex.unlock();
                 break;
             };
-            self.tunnel.send_mutex.unlock();
         }
 
         std.debug.print("[LOCAL {}] Thread exiting\n", .{self.stream_id});
@@ -542,14 +648,13 @@ const LocalConnection = struct {
     }
 
     fn stop(self: *LocalConnection) void {
+        if (self.thread_joined.swap(true, .acq_rel)) return;
         self.running.store(false, .release);
-        // Shutdown socket to unblock recv() call in thread
-        posix.shutdown(self.local_fd, .recv) catch {};
+        // Shutdown socket to unblock recv() call in thread (only if not already closed)
+        if (!self.fd_closed.load(.acquire)) {
+            posix.shutdown(self.local_fd, .recv) catch {};
+        }
         self.thread.join();
-    }
-
-    fn destroy(self: *LocalConnection) void {
-        global_allocator.destroy(self);
     }
 };
 
@@ -563,8 +668,6 @@ fn sendEncryptedMessageWrapper(conn: *anyopaque, payload: []const u8) anyerror!v
 const TunnelClient = struct {
     tunnel_fd: posix.fd_t,
     service_id: tunnel.ServiceId,
-    target_host: []const u8,
-    target_port: u16,
     connections: std.AutoHashMap(tunnel.StreamId, *LocalConnection),
     connections_mutex: std.Thread.Mutex,
     send_mutex: std.Thread.Mutex,
@@ -576,7 +679,7 @@ const TunnelClient = struct {
     running: std.atomic.Value(bool),
 
     // Pre-allocated buffer for control messages (avoid per-frame allocation)
-    control_msg_buffer: [4096]u8, // 4KB buffer for control messages (CONNECT, CLOSE, etc.)
+    control_msg_buffer: [common.CONTROL_MSG_BUFFER_SIZE]u8,
     control_msg_mutex: std.Thread.Mutex,
 
     // UDP support
@@ -593,11 +696,12 @@ const TunnelClient = struct {
     // Config reference for TCP tuning (needed for reverse mode)
     cfg: *const config.ClientConfig,
 
-    fn create(allocator: std.mem.Allocator, tunnel_fd: posix.fd_t, service_id: tunnel.ServiceId, target_host: []const u8, target_port: u16, cfg: *const config.ClientConfig, static_keypair: std.crypto.dh.X25519.KeyPair) !*TunnelClient {
+    fn create(allocator: std.mem.Allocator, tunnel_fd: posix.fd_t, service_id: tunnel.ServiceId, cfg: *const config.ClientConfig, static_keypair: std.crypto.dh.X25519.KeyPair) !*TunnelClient {
         setSockOpts(tunnel_fd, cfg);
         errdefer posix.close(tunnel_fd);
 
-        const encryption_enabled = !std.ascii.eqlIgnoreCase(cfg.cipher, "none");
+        const canonical_cipher = config.canonicalCipher(cfg);
+        const encryption_enabled = !std.mem.eql(u8, canonical_cipher, "none");
 
         var send_cipher: ?noise.TransportCipher = null;
         var recv_cipher: ?noise.TransportCipher = null;
@@ -605,7 +709,10 @@ const TunnelClient = struct {
         errdefer if (decrypt_buffer.len != 0) allocator.free(decrypt_buffer);
 
         if (encryption_enabled) {
-            const cipher_type = noise.CipherType.fromString(cfg.cipher) catch .chacha20poly1305;
+            const cipher_type = noise.CipherType.fromString(canonical_cipher) catch {
+                std.debug.print("[NOISE] Invalid cipher '{s}' in configuration\n", .{cfg.cipher});
+                return error.InvalidCipher;
+            };
 
             // Perform Noise_XX handshake (client IS initiator, uses persistent static key)
             const handshake = noise.noiseXXHandshake(tunnel_fd, cipher_type, true, static_keypair, cfg.psk) catch |err| switch (err) {
@@ -620,6 +727,61 @@ const TunnelClient = struct {
             recv_cipher = handshake.recv_cipher;
 
             decrypt_buffer = try allocator.alloc(u8, protocol.MAX_FRAME_SIZE);
+
+            // Exchange version information after successful handshake
+            const version_msg = tunnel.VersionMsg{ .version = build_options.version };
+            var version_buf: [64]u8 = undefined;
+            const version_len = try version_msg.encodeInto(&version_buf);
+
+            // Encrypt and send our version
+            var encrypted_version: [128]u8 = undefined;
+            const encrypted_len = version_len + noise.TAG_LEN;
+            try send_cipher.?.encrypt(version_buf[0..version_len], encrypted_version[0..encrypted_len]);
+
+            // Write frame directly (no mutex needed during handshake)
+            var frame_header: [4]u8 = undefined;
+            std.mem.writeInt(u32, &frame_header, @intCast(encrypted_len), .big);
+            try common.sendAllToFd(tunnel_fd, &frame_header);
+            try common.sendAllToFd(tunnel_fd, encrypted_version[0..encrypted_len]);
+
+            // Receive server version
+            var frame_buf: [256]u8 = undefined;
+            var frame_offset: usize = 0;
+
+            // Read frame header (4 bytes)
+            while (frame_offset < 4) {
+                const n = try posix.recv(tunnel_fd, frame_buf[frame_offset..], 0);
+                if (n == 0) return error.ConnectionClosed;
+                frame_offset += n;
+            }
+
+            const frame_len = std.mem.readInt(u32, frame_buf[0..4], .big);
+            if (frame_len > frame_buf.len - 4) return error.FrameTooLarge;
+
+            // Read frame payload
+            while (frame_offset < 4 + frame_len) {
+                const n = try posix.recv(tunnel_fd, frame_buf[frame_offset..], 0);
+                if (n == 0) return error.ConnectionClosed;
+                frame_offset += n;
+            }
+
+            // Decrypt server version
+            var decrypted_version: [128]u8 = undefined;
+            const decrypted_len = frame_len - noise.TAG_LEN;
+            try recv_cipher.?.decrypt(frame_buf[4 .. 4 + frame_len], decrypted_version[0..decrypted_len]);
+
+            // Parse version message
+            const server_version_msg = try tunnel.VersionMsg.decode(decrypted_version[0..decrypted_len], allocator);
+            defer allocator.free(server_version_msg.version);
+
+            // Check version compatibility
+            if (!std.mem.eql(u8, server_version_msg.version, build_options.version)) {
+                std.debug.print("[ERROR] Version mismatch: client={s}, server={s}\n", .{ build_options.version, server_version_msg.version });
+                std.debug.print("[ERROR] Please use matching floos/flooc versions\n", .{});
+                return error.VersionMismatch;
+            }
+
+            std.debug.print("[CLIENT] Version check passed: {s}\n", .{build_options.version});
         }
 
         const client = try allocator.create(TunnelClient);
@@ -629,8 +791,6 @@ const TunnelClient = struct {
         client.* = .{
             .tunnel_fd = tunnel_fd,
             .service_id = service_id,
-            .target_host = target_host,
-            .target_port = target_port,
             .connections = std.AutoHashMap(tunnel.StreamId, *LocalConnection).init(allocator),
             .connections_mutex = .{},
             .send_mutex = .{},
@@ -643,16 +803,16 @@ const TunnelClient = struct {
             .control_msg_buffer = undefined, // Pre-allocated buffer for control messages
             .control_msg_mutex = .{},
             .udp_forwarder = null,
-            .transport = cfg.transport,
-            .heartbeat_timeout_ms = cfg.heartbeat_timeout_seconds * 1000, // Convert to milliseconds
+            .transport = .tcp, // Default to TCP for now
+            .heartbeat_timeout_ms = cfg.advanced.heartbeat_timeout_seconds * 1000, // Convert to milliseconds
             .last_heartbeat_time = std.atomic.Value(i64).init(std.time.milliTimestamp()), // Initialize to current time
-            .default_token = cfg.default_token,
+            .default_token = cfg.token,
             .cfg = cfg,
         };
         decrypt_buffer = &[_]u8{};
 
         if (client.heartbeat_timeout_ms > 0) {
-            std.debug.print("[CLIENT] Heartbeat timeout enabled: {}s\n", .{cfg.heartbeat_timeout_seconds});
+            std.debug.print("[CLIENT] Heartbeat timeout enabled: {}s\n", .{cfg.advanced.heartbeat_timeout_seconds});
         }
 
         if (client.default_token.len > 0) {
@@ -663,8 +823,15 @@ const TunnelClient = struct {
     }
 
     fn setSockOpts(fd: posix.fd_t, cfg: *const config.ClientConfig) void {
-        applyTcpOptions(fd, tcpOptionsFromConfig(cfg));
-        tuneSocketBuffers(fd, cfg.socket_buffer_size);
+        const tcp_options = TcpOptions{
+            .nodelay = cfg.advanced.tcp_nodelay,
+            .keepalive = cfg.advanced.tcp_keepalive,
+            .keepalive_idle = cfg.advanced.tcp_keepalive_idle,
+            .keepalive_interval = cfg.advanced.tcp_keepalive_interval,
+            .keepalive_count = cfg.advanced.tcp_keepalive_count,
+        };
+        applyTcpOptions(fd, tcp_options);
+        tuneSocketBuffers(fd, cfg.advanced.socket_buffer_size);
     }
 
     fn run(self: *TunnelClient) void {
@@ -675,6 +842,8 @@ const TunnelClient = struct {
         // Check if decoder buffer was allocated
         if (decoder.buffer.len == 0) {
             std.debug.print("[CLIENT] Failed to allocate decoder buffer!\n", .{});
+            self.cleanup();
+            self.running.store(false, .release);
             return;
         }
 
@@ -783,34 +952,9 @@ const TunnelClient = struct {
 
         switch (msg_type) {
             .connect => {
-                // REVERSE MODE: Server is asking us to connect to local target
-                const connect_msg = try tunnel.ConnectMsg.decode(message_slice, global_allocator);
-                defer global_allocator.free(connect_msg.target_host);
-                defer global_allocator.free(connect_msg.token);
-
-                tracePrint(enable_tunnel_trace, "[CLIENT] CONNECT from server (reverse mode): service_id={} stream_id={} target={s}:{}\n", .{
-                    connect_msg.service_id,
-                    connect_msg.stream_id,
-                    connect_msg.target_host,
-                    connect_msg.target_port,
-                });
-
-                self.handleReverseConnect(connect_msg) catch |err| {
-                    std.debug.print("[CLIENT] Failed to handle reverse CONNECT: {}\n", .{err});
-                    // Send error response back to server
-                    const error_msg = tunnel.ConnectErrorMsg{
-                        .service_id = connect_msg.service_id,
-                        .stream_id = connect_msg.stream_id,
-                        .error_msg = "Connection to local target failed",
-                    };
-
-                    var encode_buf: [128]u8 = undefined;
-                    const encoded_len = error_msg.encodeInto(&encode_buf) catch return;
-
-                    self.sendEncryptedMessage(encode_buf[0..encoded_len]) catch |send_err| {
-                        self.handleSendFailure(send_err);
-                    };
-                };
+                // Client doesn't receive CONNECT messages (only server does)
+                // This would indicate a protocol error
+                std.debug.print("[CLIENT] Unexpected CONNECT message (protocol error)\n", .{});
             },
             .connect_ack => {
                 const ack = try tunnel.ConnectAckMsg.decode(message_slice);
@@ -820,7 +964,7 @@ const TunnelClient = struct {
             .connect_error => {
                 const err_msg = try tunnel.ConnectErrorMsg.decode(message_slice, global_allocator);
                 defer global_allocator.free(err_msg.error_msg);
-                std.debug.print("[CLIENT] CONNECT_ERROR stream_id={} error={s}\n", .{ err_msg.stream_id, err_msg.error_msg });
+                std.debug.print("[CLIENT] CONNECT_ERROR stream_id={} code={s} error={s}\n", .{ err_msg.stream_id, @tagName(err_msg.error_code), err_msg.error_msg });
 
                 self.connections_mutex.lock();
                 const maybe_conn = self.connections.fetchRemove(err_msg.stream_id);
@@ -828,20 +972,23 @@ const TunnelClient = struct {
 
                 if (maybe_conn) |entry| {
                     entry.value.stop();
-                    entry.value.destroy();
+                    entry.value.releaseRef();
                 }
             },
             .data => {
                 const data_msg = try tunnel.DataMsg.decode(message_slice);
 
+                var conn_ref: ?*LocalConnection = null;
                 self.connections_mutex.lock();
-                const conn = self.connections.get(data_msg.stream_id);
+                if (self.connections.get(data_msg.stream_id)) |c| {
+                    c.acquireRef();
+                    conn_ref = c;
+                }
                 self.connections_mutex.unlock();
 
-                if (conn) |c| {
-                    // Check if fd is still valid before sending
+                if (conn_ref) |c| {
+                    defer c.releaseRef();
                     if (!c.fd_closed.load(.acquire)) {
-                        // Forward to local connection (loop until all data sent)
                         sendAllToFd(c.local_fd, data_msg.data) catch |err| {
                             std.debug.print("[STREAM {}] Send to local failed: {}\n", .{ data_msg.stream_id, err });
                         };
@@ -858,7 +1005,11 @@ const TunnelClient = struct {
 
                 if (maybe_conn) |entry| {
                     entry.value.stop();
-                    entry.value.destroy();
+                    entry.value.releaseRef();
+                    std.debug.print("[CLIENT] Connection {} cleaned up after CLOSE message\n", .{close_msg.stream_id});
+                } else {
+                    // Connection already cleaned itself up
+                    tracePrint(enable_tunnel_trace, "[CLIENT] Connection {} already removed (self-cleanup)\n", .{close_msg.stream_id});
                 }
             },
             .udp_data => {
@@ -877,20 +1028,129 @@ const TunnelClient = struct {
                 self.last_heartbeat_time.store(std.time.milliTimestamp(), .release);
                 tracePrint(enable_tunnel_trace, "[HEARTBEAT] Received from server: timestamp={}\n", .{heartbeat_msg.timestamp});
             },
+            .version => {
+                // Version exchange happens during handshake only
+                // Receiving it here would be unexpected, just ignore
+                tracePrint(enable_tunnel_trace, "[CLIENT] Unexpected VERSION message during operation (ignoring)\n", .{});
+            },
+            .reverse_connect => {
+                // REVERSE MODE: Server requests reverse connection using new message format
+                const msg = try tunnel.ReverseConnectMsg.decode(message_slice);
+
+                std.debug.print("[CLIENT] REVERSE_CONNECT from server: service_id={} stream_id={}\n", .{
+                    msg.service_id,
+                    msg.stream_id,
+                });
+
+                // Look up reverse service configuration
+                var found_service: ?config.Service = null;
+                var iter = self.cfg.reverse_services.valueIterator();
+                while (iter.next()) |svc| {
+                    if (svc.id == msg.service_id) {
+                        found_service = svc.*;
+                        break;
+                    }
+                }
+
+                const service = found_service orelse {
+                    std.debug.print("[CLIENT] Unknown reverse service_id={}\n", .{msg.service_id});
+                    // Send error back
+                    const error_msg = tunnel.ConnectErrorMsg{
+                        .service_id = msg.service_id,
+                        .stream_id = msg.stream_id,
+                        .error_code = .unknown_service,
+                        .error_msg = "Unknown reverse service",
+                    };
+                    var encode_buf: [128]u8 = undefined;
+                    const encoded_len = error_msg.encodeInto(&encode_buf) catch return;
+                    self.sendEncryptedMessage(encode_buf[0..encoded_len]) catch {};
+                    return;
+                };
+
+                // Connect to local service
+                const address = resolveHostPort(service.address, service.port) catch |err| {
+                    std.debug.print("[CLIENT] Failed to resolve reverse target {s}:{}: {}\n", .{ service.address, service.port, err });
+                    return;
+                };
+
+                const local_fd = posix.socket(address.any.family, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch |err| {
+                    std.debug.print("[CLIENT] Failed to create socket for reverse: {}\n", .{err});
+                    return;
+                };
+                errdefer posix.close(local_fd);
+
+                setSockOpts(local_fd, self.cfg);
+
+                posix.connect(local_fd, &address.any, address.getOsSockLen()) catch |err| {
+                    std.debug.print("[CLIENT] Failed to connect to local target {s}:{}: {}\n", .{ service.address, service.port, err });
+                    posix.close(local_fd);
+                    // Send error back
+                    const error_code: tunnel.ErrorCode = switch (err) {
+                        error.ConnectionRefused => .connection_refused,
+                        error.ConnectionTimedOut => .connection_timeout,
+                        else => .service_unavailable,
+                    };
+                    const error_msg = tunnel.ConnectErrorMsg{
+                        .service_id = msg.service_id,
+                        .stream_id = msg.stream_id,
+                        .error_code = error_code,
+                        .error_msg = "Failed to connect to local target",
+                    };
+                    var encode_buf: [128]u8 = undefined;
+                    const encoded_len = error_msg.encodeInto(&encode_buf) catch return;
+                    self.sendEncryptedMessage(encode_buf[0..encoded_len]) catch {};
+                    return;
+                };
+
+                std.debug.print("[CLIENT-REVERSE] Connected to local {s}:{} for stream {}\n", .{ service.address, service.port, msg.stream_id });
+
+                // Create LocalConnection
+                const conn = LocalConnection.create(global_allocator, msg.service_id, msg.stream_id, local_fd, self) catch |err| {
+                    std.debug.print("[CLIENT] Failed to create reverse connection: {}\n", .{err});
+                    posix.close(local_fd);
+                    return;
+                };
+
+                // Add to connections
+                self.connections_mutex.lock();
+                conn.acquireRef(); // map reference
+                self.connections.put(msg.stream_id, conn) catch |err| {
+                    self.connections_mutex.unlock();
+                    std.debug.print("[CLIENT] Failed to store reverse connection: {}\n", .{err});
+                    conn.releaseRef(); // undo map ref
+                    conn.stop();
+                    return;
+                };
+                self.connections_mutex.unlock();
+
+                // Send CONNECT_ACK to server
+                const ack_msg = tunnel.ConnectAckMsg{
+                    .service_id = msg.service_id,
+                    .stream_id = msg.stream_id,
+                };
+                var ack_buf: [64]u8 = undefined;
+                const ack_len = ack_msg.encodeInto(&ack_buf) catch return;
+                self.sendEncryptedMessage(ack_buf[0..ack_len]) catch {};
+            },
         }
     }
 
     fn handleReverseConnect(self: *TunnelClient, msg: tunnel.ConnectMsg) !void {
-        // Connect to local target (reverse mode - server initiated)
+        const binding = getServiceBinding(self.cfg, msg.service_id) catch {
+            std.debug.print("[CLIENT-REVERSE] Unknown service_id={} requested by server\n", .{msg.service_id});
+            return error.UnknownService;
+        };
+
         std.debug.print("[CLIENT-REVERSE] Connecting to local target {s}:{} for stream_id={}\n", .{
-            msg.target_host,
-            msg.target_port,
+            binding.host,
+            binding.port,
             msg.stream_id,
         });
 
-        const address = try std.net.Address.parseIp4(msg.target_host, msg.target_port);
-        const local_fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
-        errdefer posix.close(local_fd);
+        const address = try resolveHostPort(binding.host, binding.port);
+        const local_fd = try posix.socket(address.any.family, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+        var local_fd_guard = true;
+        defer if (local_fd_guard) posix.close(local_fd);
 
         setSockOpts(local_fd, self.cfg);
 
@@ -900,12 +1160,14 @@ const TunnelClient = struct {
 
         // Create LocalConnection to handle forwarding
         const conn = try LocalConnection.create(global_allocator, msg.service_id, msg.stream_id, local_fd, self);
+        local_fd_guard = false;
 
         self.connections_mutex.lock();
+        conn.acquireRef();
         self.connections.put(msg.stream_id, conn) catch |err| {
             self.connections_mutex.unlock();
+            conn.releaseRef();
             conn.stop();
-            conn.destroy();
             return err;
         };
         self.connections_mutex.unlock();
@@ -929,23 +1191,24 @@ const TunnelClient = struct {
     }
 
     fn handleNewConnectionWithServiceId(self: *TunnelClient, local_fd: posix.fd_t, service_id: tunnel.ServiceId) !void {
-        // Use TunnelClient's target for legacy mode (will be overridden in multi-service)
-        return self.handleNewConnectionFull(local_fd, service_id, self.target_host, self.target_port, self.default_token);
+        // Use TunnelClient's default token unless overridden by multi-service context
+        return self.handleNewConnectionFull(local_fd, service_id, self.default_token);
     }
 
-    fn handleNewConnectionFull(self: *TunnelClient, local_fd: posix.fd_t, service_id: tunnel.ServiceId, target_host: []const u8, target_port: u16, token: []const u8) !void {
+    fn handleNewConnectionFull(self: *TunnelClient, local_fd: posix.fd_t, service_id: tunnel.ServiceId, token: []const u8) !void {
         const stream_id = self.next_stream_id.fetchAdd(1, .acq_rel);
 
-        tracePrint(enable_tunnel_trace, "[CLIENT] New local connection, service_id={} stream_id={} target={}:{}\n", .{ service_id, stream_id, target_host, target_port });
+        tracePrint(enable_tunnel_trace, "[CLIENT] New local connection, service_id={} stream_id={}\n", .{ service_id, stream_id });
 
         // Create local connection handler
         const conn = try LocalConnection.create(global_allocator, service_id, stream_id, local_fd, self);
 
         self.connections_mutex.lock();
+        conn.acquireRef();
         self.connections.put(stream_id, conn) catch |err| {
             self.connections_mutex.unlock();
+            conn.releaseRef();
             conn.stop();
-            conn.destroy();
             return err;
         };
         self.connections_mutex.unlock();
@@ -954,8 +1217,6 @@ const TunnelClient = struct {
         const connect_msg = tunnel.ConnectMsg{
             .service_id = service_id,
             .stream_id = stream_id,
-            .target_host = target_host,
-            .target_port = target_port,
             .token = token,
         };
 
@@ -964,68 +1225,27 @@ const TunnelClient = struct {
         const encoded_len = try connect_msg.encodeInto(&encode_buf);
 
         self.sendEncryptedMessage(encode_buf[0..encoded_len]) catch |err| {
-            self.handleSendFailure(err);
+            std.debug.print("[CLIENT] Failed to send CONNECT: {}\n", .{err});
             return err;
         };
     }
 
     /// Send all data to a file descriptor, looping until complete.
-    /// This handles partial writes correctly (blocking sockets can still short-write).
-    /// NOTE: This function is duplicated in server.zig. Consider extracting to common.zig.
-    fn sendAllToFd(fd: posix.fd_t, data: []const u8) !void {
-        var offset: usize = 0;
-        while (offset < data.len) {
-            const n = posix.send(fd, data[offset..], 0) catch |err| return err;
-            if (n == 0) return error.ConnectionClosed;
-            offset += n;
-        }
-    }
+    /// Extracted to common.zig to eliminate duplication with server.zig.
+    const sendAllToFd = common.sendAllToFd;
 
     /// Write length-prefixed frame using writev() for scatter-gather I/O.
-    /// NOTE: This function is duplicated in server.zig. Consider extracting to common.zig.
+    /// Extracted to common.zig to eliminate duplication with server.zig.
     fn writeFrameLocked(self: *TunnelClient, payload: []const u8) !void {
-        var header: [4]u8 = undefined;
-        std.mem.writeInt(u32, header[0..4], @intCast(payload.len), .big);
-
-        var iovecs = [_]posix.iovec_const{
-            posix.iovec_const{ .base = header[0..].ptr, .len = header.len },
-            posix.iovec_const{ .base = payload.ptr, .len = payload.len },
-        };
-
-        var index: usize = 0;
-        while (index < iovecs.len) {
-            const written = posix.writev(self.tunnel_fd, iovecs[index..]) catch |err| switch (err) {
-                error.WouldBlock => continue,
-                else => return err,
-            };
-            if (written == 0) return error.ConnectionClosed;
-
-            var remaining = written;
-            var current = index;
-            while (remaining > 0 and current < iovecs.len) {
-                if (remaining >= iovecs[current].len) {
-                    remaining -= iovecs[current].len;
-                    current += 1;
-                } else {
-                    iovecs[current].base += remaining;
-                    iovecs[current].len -= remaining;
-                    remaining = 0;
-                }
-            }
-            index = current;
-        }
+        return common.writeFrameLocked(self.tunnel_fd, payload);
     }
 
     /// Send plaintext frame (framing only, no encryption).
     /// NOTE: Similar implementation exists in server.zig. Consider unifying.
     fn sendPlainFrame(self: *TunnelClient, payload: []const u8) !void {
         self.send_mutex.lock();
-        const send_result = self.writeFrameLocked(payload);
-        self.send_mutex.unlock();
-        send_result catch |err| {
-            self.handleSendFailure(err);
-            return err;
-        };
+        defer self.send_mutex.unlock();
+        try self.writeFrameLocked(payload);
     }
 
     /// Encrypt a message payload and send it with frame length prefix.
@@ -1060,12 +1280,8 @@ const TunnelClient = struct {
         }
 
         self.send_mutex.lock();
-        const send_result = self.writeFrameLocked(self.control_msg_buffer[0..encrypted_len]);
-        self.send_mutex.unlock();
-        send_result catch |err| {
-            self.handleSendFailure(err);
-            return err;
-        };
+        defer self.send_mutex.unlock();
+        try self.writeFrameLocked(self.control_msg_buffer[0..encrypted_len]);
     }
 
     fn handleSendFailure(self: *TunnelClient, err: anyerror) void {
@@ -1084,21 +1300,23 @@ const TunnelClient = struct {
         }
 
         // Stop all connections
-        self.connections_mutex.lock();
-        var it = self.connections.valueIterator();
-        while (it.next()) |conn| {
-            conn.*.stop();
-        }
-        self.connections_mutex.unlock();
-
-        // Destroy connections
-        self.connections_mutex.lock();
-        var it2 = self.connections.valueIterator();
-        while (it2.next()) |conn| {
-            conn.*.destroy();
+        while (true) {
+            self.connections_mutex.lock();
+            var iter = self.connections.iterator();
+            const entry = iter.next();
+            if (entry) |e| {
+                const key_copy = e.key_ptr.*;
+                const conn_ptr = e.value_ptr.*;
+                _ = self.connections.remove(key_copy);
+                self.connections_mutex.unlock();
+                conn_ptr.stop();
+                conn_ptr.releaseRef();
+            } else {
+                self.connections_mutex.unlock();
+                break;
+            }
         }
         self.connections.deinit();
-        self.connections_mutex.unlock();
 
         if (self.decrypt_buffer.len > 0) {
             global_allocator.free(self.decrypt_buffer);
@@ -1119,15 +1337,20 @@ const TunnelClient = struct {
 const TcpServiceListenerContext = struct {
     allocator: std.mem.Allocator,
     service_id: tunnel.ServiceId,
+    local_host: []const u8,
     local_port: u16,
-    target_host: []const u8,
-    target_port: u16,
     token: []const u8,
     tunnel_clients: []?*TunnelClient,
     tunnel_clients_mutex: *std.Thread.Mutex,
     num_tunnels: usize,
     socket_buffer_size: u32,
     tcp_options: TcpOptions,
+
+    fn destroy(self: *TcpServiceListenerContext) void {
+        self.allocator.free(self.local_host);
+        self.allocator.free(self.token);
+        self.allocator.destroy(self);
+    }
 };
 
 inline fn loadTunnelClient(
@@ -1148,10 +1371,15 @@ inline fn loadTunnelClient(
 /// TCP service listener thread - handles one service
 fn tcpServiceListener(ctx_ptr: *anyopaque) void {
     const ctx: *TcpServiceListenerContext = @ptrCast(@alignCast(ctx_ptr));
-    defer ctx.allocator.destroy(ctx);
+    defer ctx.destroy();
+
+    const local_addr = resolveHostPort(ctx.local_host, ctx.local_port) catch |err| {
+        std.debug.print("[TCP-SERVICE] Failed to parse address for service_id={}: {}\n", .{ ctx.service_id, err });
+        return;
+    };
 
     // Create listener socket
-    const listen_fd = posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch |err| {
+    const listen_fd = posix.socket(local_addr.any.family, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch |err| {
         std.debug.print("[TCP-SERVICE] Failed to create socket for service_id={}: {}\n", .{ ctx.service_id, err });
         return;
     };
@@ -1159,22 +1387,17 @@ fn tcpServiceListener(ctx_ptr: *anyopaque) void {
 
     posix.setsockopt(listen_fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, &std.mem.toBytes(@as(c_int, 1))) catch {};
 
-    const local_addr = std.net.Address.parseIp4("127.0.0.1", ctx.local_port) catch |err| {
-        std.debug.print("[TCP-SERVICE] Failed to parse address for service_id={}: {}\n", .{ ctx.service_id, err });
-        return;
-    };
-
     posix.bind(listen_fd, &local_addr.any, local_addr.getOsSockLen()) catch |err| {
         std.debug.print("[TCP-SERVICE] Failed to bind service_id={} on port {}: {}\n", .{ ctx.service_id, ctx.local_port, err });
         return;
     };
 
-    posix.listen(listen_fd, 128) catch |err| {
+    posix.listen(listen_fd, common.LISTEN_BACKLOG) catch |err| {
         std.debug.print("[TCP-SERVICE] Failed to listen for service_id={}: {}\n", .{ ctx.service_id, err });
         return;
     };
 
-    std.debug.print("[TCP-SERVICE] Listening on 127.0.0.1:{} (service_id={})\n", .{ ctx.local_port, ctx.service_id });
+    std.debug.print("[TCP-SERVICE] Listening on {s}:{} (service_id={})\n", .{ ctx.local_host, ctx.local_port, ctx.service_id });
 
     // Accept loop with round-robin distribution
     var next_tunnel: usize = 0;
@@ -1200,7 +1423,7 @@ fn tcpServiceListener(ctx_ptr: *anyopaque) void {
         var attempts: usize = 0;
         while (attempts < ctx.num_tunnels) : (attempts += 1) {
             if (loadTunnelClient(ctx.tunnel_clients, ctx.tunnel_clients_mutex, next_tunnel)) |client| {
-                client.handleNewConnectionFull(local_fd, ctx.service_id, ctx.target_host, ctx.target_port, ctx.token) catch |err| {
+                client.handleNewConnectionFull(local_fd, ctx.service_id, ctx.token) catch |err| {
                     std.debug.print("[TCP-SERVICE] Failed to handle connection for service_id={}: {}\n", .{ ctx.service_id, err });
                     posix.close(local_fd);
                 };
@@ -1225,8 +1448,6 @@ fn tcpServiceListener(ctx_ptr: *anyopaque) void {
 const TunnelConnectionParams = struct {
     tunnel_index: usize,
     service_id: tunnel.ServiceId,
-    target_host: []const u8,
-    target_port: u16,
     remote_host: []const u8,
     remote_port: u16,
     cfg: *const config.ClientConfig,
@@ -1238,34 +1459,25 @@ const TunnelConnectionParams = struct {
 /// Tunnel connection thread with auto-reconnection
 fn tunnelThreadWithReconnection(params_ptr: *TunnelConnectionParams) void {
     const params = params_ptr.*;
-    var retry_delay_ms = params.cfg.reconnect_initial_delay_ms;
+    var retry_delay_ms = params.cfg.advanced.reconnect_initial_delay_ms;
     var attempt: usize = 0;
 
     while (!shutdown_flag.load(.acquire)) {
         attempt += 1;
 
-        // Connect to tunnel server
-        const remote_addr = std.net.Address.parseIp4(params.remote_host, params.remote_port) catch |err| {
-            std.debug.print("[TUNNEL {}] Failed to parse remote address: {}\n", .{ params.tunnel_index, err });
-            std.Thread.sleep(retry_delay_ms * std.time.ns_per_ms);
-            retry_delay_ms = @min(retry_delay_ms * params.cfg.reconnect_backoff_multiplier, params.cfg.reconnect_max_delay_ms);
-            continue;
-        };
-
         // Parse proxy config if provided
         var proxy_cfg_opt: ?proxy.ProxyConfig = null;
-        if (params.cfg.proxy_url.len > 0) {
-            proxy_cfg_opt = proxy.ProxyConfig.parseUrl(global_allocator, params.cfg.proxy_url) catch |err| {
+        if (params.cfg.advanced.proxy_url.len > 0) {
+            proxy_cfg_opt = proxy.ProxyConfig.parseUrl(global_allocator, params.cfg.advanced.proxy_url) catch |err| {
                 std.debug.print("[TUNNEL {}] Invalid proxy URL: {}\n", .{ params.tunnel_index, err });
                 std.Thread.sleep(retry_delay_ms * std.time.ns_per_ms);
-                retry_delay_ms = @min(retry_delay_ms * params.cfg.reconnect_backoff_multiplier, params.cfg.reconnect_max_delay_ms);
+                retry_delay_ms = @min(retry_delay_ms * params.cfg.advanced.reconnect_backoff_multiplier, params.cfg.advanced.reconnect_max_delay_ms);
                 continue;
             };
         }
         defer if (proxy_cfg_opt) |*cfg| cfg.deinit(global_allocator);
 
-        // Connect to tunnel server (potentially through proxy)
-        const tunnel_fd = if (proxy_cfg_opt) |proxy_cfg| blk: {
+        if (proxy_cfg_opt) |proxy_cfg| {
             if (proxy_cfg.proxy_type != .none) {
                 std.debug.print("[TUNNEL {}] Connecting via {s} proxy {s}:{}\n", .{
                     params.tunnel_index,
@@ -1274,39 +1486,29 @@ fn tunnelThreadWithReconnection(params_ptr: *TunnelConnectionParams) void {
                     proxy_cfg.port,
                 });
             }
-            break :blk proxy.connectWithProxy(
-                global_allocator,
-                proxy_cfg,
-                params.remote_host,
-                params.remote_port,
-            ) catch |err| {
-                std.debug.print("[TUNNEL {}] Proxy connection failed (attempt {}): {}, retrying in {}ms...\n", .{ params.tunnel_index, attempt, err, retry_delay_ms });
-                std.Thread.sleep(retry_delay_ms * std.time.ns_per_ms);
-                retry_delay_ms = @min(retry_delay_ms * params.cfg.reconnect_backoff_multiplier, params.cfg.reconnect_max_delay_ms);
-                continue;
-            };
-        } else blk: {
-            // Direct connection (no proxy)
-            const fd = posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch |err| {
-                std.debug.print("[TUNNEL {}] Failed to create socket: {}\n", .{ params.tunnel_index, err });
-                std.Thread.sleep(retry_delay_ms * std.time.ns_per_ms);
-                retry_delay_ms = @min(retry_delay_ms * params.cfg.reconnect_backoff_multiplier, params.cfg.reconnect_max_delay_ms);
-                continue;
-            };
-            errdefer posix.close(fd);
+        }
 
-            posix.connect(fd, &remote_addr.any, remote_addr.getOsSockLen()) catch |err| {
-                std.debug.print("[TUNNEL {}] Connection failed (attempt {}): {}, retrying in {}ms...\n", .{ params.tunnel_index, attempt, err, retry_delay_ms });
-                posix.close(fd);
-                std.Thread.sleep(retry_delay_ms * std.time.ns_per_ms);
-                retry_delay_ms = @min(retry_delay_ms * params.cfg.reconnect_backoff_multiplier, params.cfg.reconnect_max_delay_ms);
-                continue;
-            };
-            break :blk fd;
+        const tunnel_fd = proxy.connectWithProxy(
+            global_allocator,
+            proxy_cfg_opt,
+            params.remote_host,
+            params.remote_port,
+        ) catch |err| {
+            std.debug.print("[TUNNEL {}] Connection failed (attempt {}): {}, retrying in {}ms...\n", .{ params.tunnel_index, attempt, err, retry_delay_ms });
+            std.Thread.sleep(retry_delay_ms * std.time.ns_per_ms);
+            retry_delay_ms = @min(retry_delay_ms * params.cfg.advanced.reconnect_backoff_multiplier, params.cfg.advanced.reconnect_max_delay_ms);
+            continue;
         };
 
-        applyTcpOptions(tunnel_fd, tcpOptionsFromConfig(params.cfg));
-        tuneSocketBuffers(tunnel_fd, params.cfg.socket_buffer_size);
+        const tcp_options = TcpOptions{
+            .nodelay = params.cfg.advanced.tcp_nodelay,
+            .keepalive = params.cfg.advanced.tcp_keepalive,
+            .keepalive_idle = params.cfg.advanced.tcp_keepalive_idle,
+            .keepalive_interval = params.cfg.advanced.tcp_keepalive_interval,
+            .keepalive_count = params.cfg.advanced.tcp_keepalive_count,
+        };
+        applyTcpOptions(tunnel_fd, tcp_options);
+        tuneSocketBuffers(tunnel_fd, params.cfg.advanced.socket_buffer_size);
 
         // Successfully connected
         std.debug.print("[TUNNEL {}] Connected to {s}:{} (attempt {})\n", .{ params.tunnel_index, params.remote_host, params.remote_port, attempt });
@@ -1316,14 +1518,12 @@ fn tunnelThreadWithReconnection(params_ptr: *TunnelConnectionParams) void {
             global_allocator,
             tunnel_fd,
             params.service_id,
-            params.target_host,
-            params.target_port,
             params.cfg,
             params.static_keypair,
         ) catch |err| {
             std.debug.print("[TUNNEL {}] Failed to create client: {}\n", .{ params.tunnel_index, err });
             std.Thread.sleep(retry_delay_ms * std.time.ns_per_ms);
-            retry_delay_ms = @min(retry_delay_ms * params.cfg.reconnect_backoff_multiplier, params.cfg.reconnect_max_delay_ms);
+            retry_delay_ms = @min(retry_delay_ms * params.cfg.advanced.reconnect_backoff_multiplier, params.cfg.advanced.reconnect_max_delay_ms);
             continue;
         };
 
@@ -1333,7 +1533,7 @@ fn tunnelThreadWithReconnection(params_ptr: *TunnelConnectionParams) void {
         params.tunnel_clients_mutex.unlock();
 
         // Reset retry delay on successful connection
-        retry_delay_ms = params.cfg.reconnect_initial_delay_ms;
+        retry_delay_ms = params.cfg.advanced.reconnect_initial_delay_ms;
 
         // Run client (blocks until disconnection)
         tunnel_client.run();
@@ -1345,7 +1545,7 @@ fn tunnelThreadWithReconnection(params_ptr: *TunnelConnectionParams) void {
         tunnel_client.destroy();
 
         // Check if reconnection is enabled
-        if (!params.cfg.reconnect_enabled or shutdown_flag.load(.acquire)) {
+        if (!params.cfg.advanced.reconnect_enabled or shutdown_flag.load(.acquire)) {
             std.debug.print("[TUNNEL {}] Reconnection disabled or shutting down\n", .{params.tunnel_index});
             break;
         }
@@ -1427,7 +1627,8 @@ pub fn main() !void {
     var cfg = try loadClientConfigWithOverrides(allocator, &cli_opts);
     defer cfg.deinit();
 
-    if (std.ascii.eqlIgnoreCase(cfg.cipher, "none")) {
+    const canonical_cipher = config.canonicalCipher(&cfg);
+    if (std.mem.eql(u8, canonical_cipher, "none")) {
         std.debug.print("[WARN] Client encryption disabled; ensure tokens are treated as secrets.\n", .{});
     } else if (cfg.psk.len == 0) {
         std.debug.print("[WARN] Client PSK is empty; connection attempts will fail.\n", .{});
@@ -1435,8 +1636,8 @@ pub fn main() !void {
         std.debug.print("[WARN] Client is using the placeholder PSK '{s}'. Change this before deployment.\n", .{config.DEFAULT_PSK});
     }
 
-    var default_token_required = !cfg.has_services;
-    if (cfg.has_services) {
+    var default_token_required = cfg.services.count() == 0;
+    if (!default_token_required) {
         var iter = cfg.services.valueIterator();
         while (iter.next()) |service| {
             if (service.token.len == 0) {
@@ -1446,28 +1647,43 @@ pub fn main() !void {
         }
     }
 
-    if (default_token_required and cfg.default_token.len == 0) {
+    if (default_token_required and cfg.token.len == 0) {
         std.debug.print("[WARN] Client default token is empty; server access control will fail.\n", .{});
-    } else if (cfg.default_token.len > 0 and std.mem.eql(u8, cfg.default_token, config.DEFAULT_TOKEN)) {
+    } else if (cfg.token.len > 0 and std.mem.eql(u8, cfg.token, config.DEFAULT_TOKEN)) {
         std.debug.print("[WARN] Client is using the placeholder token '{s}'. Update configs to a secret value.\n", .{config.DEFAULT_TOKEN});
     }
 
-    const local_host: []const u8 = cfg.local_host;
-    var local_port = cfg.local_port;
-    var remote_host: []const u8 = cfg.remote_host;
-    var remote_port = cfg.remote_port;
-    var target_host: []const u8 = cfg.target_host;
-    var target_port: u16 = cfg.target_port;
+    const remote_host = try cfg.getServerHost();
+    const remote_port = try cfg.getServerPort();
+
+    // Get default service for single-service mode
+    var default_service_id: tunnel.ServiceId = 0;
+    var local_host: []const u8 = "127.0.0.1";
+    var local_port: u16 = 9001;
+    var transport: config.Transport = .tcp; // Default to TCP for single-service mode
+
+    if (cfg.default_service) |service_name| {
+        if (cfg.services.get(service_name)) |service| {
+            default_service_id = service.id;
+            local_host = service.address;
+            local_port = service.port;
+            transport = service.transport;
+        }
+    }
 
     std.debug.print("Floo Tunnel Client (flooc-blocking)\n", .{});
     std.debug.print("====================================\n\n", .{});
     std.debug.print("[CONFIG] Local:  {s}:{}\n", .{ local_host, local_port });
     std.debug.print("[CONFIG] Remote: {s}:{}\n", .{ remote_host, remote_port });
-    std.debug.print("[CONFIG] Target: {s}:{}\n", .{ target_host, target_port });
-    std.debug.print("[CONFIG] Transport: {any}\n", .{cfg.transport});
-    std.debug.print("[CONFIG] Parallel Tunnels: {}\n", .{cfg.num_tunnels});
+    if (default_service_id != 0) {
+        std.debug.print("[CONFIG] Default Service ID: {}\n", .{default_service_id});
+    } else {
+        std.debug.print("[CONFIG] Default Service ID: (unset)\n", .{});
+    }
+    std.debug.print("[CONFIG] Services: {}\n", .{cfg.services.count()});
+    std.debug.print("[CONFIG] Parallel Tunnels: {}\n", .{cfg.advanced.num_tunnels});
     std.debug.print("[CONFIG] Mode: Blocking I/O + Threads\n", .{});
-    std.debug.print("[CONFIG] Hot Reload: Enabled (send SIGHUP to reload tunnel settings)\n\n", .{});
+    std.debug.print("[CONFIG] Hot Reload: Disabled (restart flooc to apply configuration changes)\n\n", .{});
 
     // Register signal handlers (POSIX only)
     if (@hasDecl(posix, "Sigaction") and @hasDecl(posix, "sigaction")) {
@@ -1483,10 +1699,18 @@ pub fn main() !void {
         if (@hasDecl(posix.SIG, "USR1")) {
             posix.sigaction(posix.SIG.USR1, &sig_action, null);
         }
+        if (@hasDecl(posix.SIG, "PIPE")) {
+            const ignore = posix.Sigaction{
+                .handler = .{ .handler = posix.SIG.IGN },
+                .mask = std.mem.zeroes(posix.sigset_t),
+                .flags = 0,
+            };
+            posix.sigaction(posix.SIG.PIPE, &ignore, null);
+        }
     }
 
     // Connect to tunnel server with parallel tunnels
-    const num_tunnels = cfg.num_tunnels;
+    const num_tunnels = cfg.advanced.num_tunnels;
     std.debug.print("[CLIENT] Connecting {} parallel tunnels to {s}:{}...\n", .{ num_tunnels, remote_host, remote_port });
 
     // Generate persistent static keypair for Noise XX authentication
@@ -1511,9 +1735,7 @@ pub fn main() !void {
     for (0..num_tunnels) |i| {
         tunnel_params[i] = .{
             .tunnel_index = i,
-            .service_id = cfg.service_id,
-            .target_host = target_host,
-            .target_port = target_port,
+            .service_id = default_service_id,
             .remote_host = remote_host,
             .remote_port = remote_port,
             .cfg = &cfg,
@@ -1524,46 +1746,56 @@ pub fn main() !void {
 
         // Spawn tunnel handler thread with reconnection
         const tunnel_thread = try std.Thread.spawn(.{
-            .stack_size = 512 * 1024, // 512KB stack (sufficient for 256KB buffer + overhead)
+            .stack_size = common.TUNNEL_THREAD_STACK,
         }, tunnelThreadWithReconnection, .{&tunnel_params[i]});
         tunnel_thread.detach();
     }
 
-    std.debug.print("[CLIENT] All tunnel threads started (reconnection: {})\n", .{cfg.reconnect_enabled});
+    std.debug.print("[CLIENT] All tunnel threads started (reconnection: {})\n", .{cfg.advanced.reconnect_enabled});
 
     // Check if multi-service mode is enabled
-    if (cfg.has_services) {
+    if (cfg.services.count() > 0) {
         std.debug.print("\n[MULTI-SERVICE] Starting {} services...\n", .{cfg.services.count()});
 
         // Create listeners/forwarders for each service
         var service_iter = cfg.services.valueIterator();
         while (service_iter.next()) |service| {
-            std.debug.print("[SERVICE] Starting service '{s}' (id={}, transport={any}, local={}, target={s}:{})\n", .{
+            std.debug.print("[SERVICE] Starting service '{s}' (id={}, transport={any}, local={s}:{})\n", .{
                 service.name,
-                service.service_id,
+                service.id,
                 service.transport,
-                service.local_port,
-                service.target_host,
-                service.target_port,
+                service.address,
+                service.port,
             });
 
             if (service.transport == .tcp) {
                 // Create TCP listener thread for this service
+                const effective_token = if (service.token.len > 0) service.token else cfg.token;
+                const token_copy = try allocator.dupe(u8, effective_token);
+                errdefer allocator.free(token_copy);
+                const local_host_copy = try allocator.dupe(u8, service.address);
+                errdefer allocator.free(local_host_copy);
+
                 const ctx = try allocator.create(TcpServiceListenerContext);
                 ctx.* = .{
                     .allocator = allocator,
-                    .service_id = service.service_id,
-                    .local_port = service.local_port,
-                    .target_host = service.target_host,
-                    .target_port = service.target_port,
-                    .token = service.token,
+                    .service_id = service.id,
+                    .local_host = local_host_copy,
+                    .local_port = service.port,
+                    .token = token_copy,
                     .tunnel_clients = tunnel_clients,
                     .tunnel_clients_mutex = &tunnel_clients_mutex,
                     .num_tunnels = num_tunnels,
-                    .socket_buffer_size = cfg.socket_buffer_size,
-                    .tcp_options = tcpOptionsFromConfig(&cfg),
+                    .socket_buffer_size = cfg.advanced.socket_buffer_size,
+                    .tcp_options = TcpOptions{
+                        .nodelay = cfg.advanced.tcp_nodelay,
+                        .keepalive = cfg.advanced.tcp_keepalive,
+                        .keepalive_idle = cfg.advanced.tcp_keepalive_idle,
+                        .keepalive_interval = cfg.advanced.tcp_keepalive_interval,
+                        .keepalive_count = cfg.advanced.tcp_keepalive_count,
+                    },
                 };
-
+                // Ownership transferred to ctx
                 const thread = try std.Thread.spawn(.{}, tcpServiceListener, .{ctx});
                 thread.detach();
             } else if (service.transport == .udp) {
@@ -1573,16 +1805,16 @@ pub fn main() !void {
                 }
 
                 if (loadTunnelClient(tunnel_clients, &tunnel_clients_mutex, 0)) |first_client| {
+                    const effective_token = if (service.token.len > 0) service.token else cfg.token;
                     // Create UDP forwarder for this service
                     const forwarder = try udp_client.UdpForwarder.create(
                         allocator,
-                        service.service_id,
-                        service.local_port,
-                        service.target_host,
-                        service.target_port,
+                        service.id,
+                        service.address,
+                        service.port,
                         @ptrCast(first_client),
                         sendEncryptedMessageWrapper,
-                        cfg.udp_timeout_seconds,
+                        cfg.advanced.udp_timeout_seconds,
                     );
 
                     // Store forwarder reference (for cleanup)
@@ -1591,18 +1823,16 @@ pub fn main() !void {
                     // Send initial CONNECT message for UDP service
                     const stream_id = first_client.next_stream_id.fetchAdd(1, .acq_rel);
                     const connect_msg = tunnel.ConnectMsg{
-                        .service_id = service.service_id,
+                        .service_id = service.id,
                         .stream_id = stream_id,
-                        .target_host = service.target_host,
-                        .target_port = service.target_port,
-                        .token = service.token,
+                        .token = effective_token,
                     };
 
                     var encode_buf: [512]u8 = undefined;
                     const encoded_len = try connect_msg.encodeInto(&encode_buf);
                     try first_client.sendEncryptedMessage(encode_buf[0..encoded_len]);
 
-                    std.debug.print("[UDP-SERVICE] Service '{s}' ready on 127.0.0.1:{}\n", .{ service.name, service.local_port });
+                    std.debug.print("[UDP-SERVICE] Service '{s}' ready on {s}:{}\n", .{ service.name, service.address, service.port });
                 }
             }
         }
@@ -1613,7 +1843,7 @@ pub fn main() !void {
         while (!shutdown_flag.load(.acquire)) {
             std.Thread.sleep(1 * std.time.ns_per_s);
         }
-    } else if (cfg.transport == .udp) {
+    } else if (transport == .udp) {
         // Legacy single-service UDP mode
         // UDP mode: create UDP forwarders
         std.debug.print("[UDP-CLIENT] Creating UDP forwarders on port {}...\n", .{local_port});
@@ -1628,13 +1858,12 @@ pub fn main() !void {
             // but for simplicity, create just one forwarder for the first tunnel)
             const forwarder = try udp_client.UdpForwarder.create(
                 allocator,
-                cfg.service_id,
+                default_service_id,
+                local_host,
                 local_port,
-                target_host,
-                target_port,
                 @ptrCast(first_client),
                 sendEncryptedMessageWrapper,
-                cfg.udp_timeout_seconds,
+                cfg.advanced.udp_timeout_seconds,
             );
 
             first_client.udp_forwarder = forwarder;
@@ -1642,10 +1871,8 @@ pub fn main() !void {
             // Send CONNECT message to server to initialize UDP forwarder
             const stream_id = first_client.next_stream_id.fetchAdd(1, .acq_rel);
             const connect_msg = tunnel.ConnectMsg{
-                .service_id = cfg.service_id,
+                .service_id = default_service_id,
                 .stream_id = stream_id,
-                .target_host = target_host,
-                .target_port = target_port,
                 .token = first_client.default_token,
             };
 
@@ -1654,57 +1881,11 @@ pub fn main() !void {
             try first_client.sendEncryptedMessage(encode_buf[0..encoded_len]);
 
             std.debug.print("[UDP-CLIENT] Sent CONNECT message to server (stream_id={})\n", .{stream_id});
-            std.debug.print("[UDP-CLIENT] UDP forwarder ready on 127.0.0.1:{}\n", .{local_port});
+            std.debug.print("[UDP-CLIENT] UDP forwarder ready on {s}:{}\n", .{ local_host, local_port });
             std.debug.print("[READY] Client ready. Press Ctrl+C to stop.\n\n", .{});
 
             // Wait for shutdown signal
             while (!shutdown_flag.load(.acquire)) {
-                // Check for config reload request
-                if (reload_config_flag.load(.acquire)) {
-                    reload_config_flag.store(false, .release);
-
-                    std.debug.print("[RELOAD] Reloading configuration from {s}...\n", .{config_path_global});
-
-                    const new_cfg = config.ClientConfig.loadFromFile(allocator, config_path_global) catch |err| {
-                        std.debug.print("[RELOAD] Failed to reload config: {} - keeping current config\n", .{err});
-                        continue;
-                    };
-
-                    // Update runtime copies before swapping to avoid dangling references
-                    local_port = new_cfg.local_port;
-                    remote_host = new_cfg.remote_host;
-                    remote_port = new_cfg.remote_port;
-                    target_host = new_cfg.target_host;
-                    target_port = new_cfg.target_port;
-
-                    cfg.deinit();
-                    cfg = new_cfg;
-
-                    std.debug.print("[RELOAD] Configuration reloaded successfully!\n", .{});
-                    std.debug.print("[RELOAD] Heartbeat timeout: {}s\n", .{cfg.heartbeat_timeout_seconds});
-                    std.debug.print("[RELOAD] TCP tuning: nodelay={} keepalive={}\n", .{ cfg.tcp_nodelay, cfg.tcp_keepalive });
-                    std.debug.print("[RELOAD] Note: Tunnel settings apply on next reconnection\n", .{});
-                    std.debug.print("[RELOAD] Note: Service changes require client restart (dynamic service management coming in v2)\n", .{});
-
-                    for (tunnel_params) |*param| {
-                        param.remote_host = remote_host;
-                        param.remote_port = remote_port;
-                        param.target_host = target_host;
-                        param.target_port = target_port;
-                        param.service_id = cfg.service_id;
-                    }
-                    tunnel_clients_mutex.lock();
-                    for (tunnel_clients) |client_opt| {
-                        if (client_opt) |client| {
-                            client.service_id = cfg.service_id;
-                            client.target_host = target_host;
-                            client.target_port = target_port;
-                            client.default_token = cfg.default_token;
-                        }
-                    }
-                    tunnel_clients_mutex.unlock();
-                }
-
                 std.Thread.sleep(1 * std.time.ns_per_s);
 
                 // Periodic session cleanup
@@ -1713,14 +1894,14 @@ pub fn main() !void {
         }
     } else {
         // TCP mode: create local listener
-        const listen_fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+        const local_addr = try resolveHostPort(local_host, local_port);
+        const listen_fd = try posix.socket(local_addr.any.family, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
         defer posix.close(listen_fd);
 
         try posix.setsockopt(listen_fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, &std.mem.toBytes(@as(c_int, 1)));
 
-        const local_addr = try std.net.Address.parseIp4(local_host, local_port);
         try posix.bind(listen_fd, &local_addr.any, local_addr.getOsSockLen());
-        try posix.listen(listen_fd, 128);
+        try posix.listen(listen_fd, common.LISTEN_BACKLOG);
 
         std.debug.print("[LISTENER] Listening on {s}:{}\n", .{ local_host, local_port });
         std.debug.print("[READY] Client ready. Press Ctrl+C to stop.\n\n", .{});
@@ -1728,51 +1909,6 @@ pub fn main() !void {
         // Accept loop with round-robin distribution
         var next_tunnel: usize = 0;
         while (!shutdown_flag.load(.acquire)) {
-            // Check for config reload request
-            if (reload_config_flag.load(.acquire)) {
-                reload_config_flag.store(false, .release);
-
-                std.debug.print("[RELOAD] Reloading configuration from {s}...\n", .{config_path_global});
-
-                const new_cfg = config.ClientConfig.loadFromFile(allocator, config_path_global) catch |err| {
-                    std.debug.print("[RELOAD] Failed to reload config: {} - keeping current config\n", .{err});
-                    continue;
-                };
-
-                local_port = new_cfg.local_port;
-                remote_host = new_cfg.remote_host;
-                remote_port = new_cfg.remote_port;
-                target_host = new_cfg.target_host;
-                target_port = new_cfg.target_port;
-
-                cfg.deinit();
-                cfg = new_cfg;
-
-                std.debug.print("[RELOAD] Configuration reloaded successfully!\n", .{});
-                std.debug.print("[RELOAD] Heartbeat timeout: {}s\n", .{cfg.heartbeat_timeout_seconds});
-                std.debug.print("[RELOAD] TCP tuning: nodelay={} keepalive={}\n", .{ cfg.tcp_nodelay, cfg.tcp_keepalive });
-                std.debug.print("[RELOAD] Note: Tunnel settings apply on next reconnection\n", .{});
-                std.debug.print("[RELOAD] Note: Service changes require client restart (dynamic service management coming in v2)\n", .{});
-
-                for (tunnel_params) |*param| {
-                    param.remote_host = remote_host;
-                    param.remote_port = remote_port;
-                    param.target_host = target_host;
-                    param.target_port = target_port;
-                    param.service_id = cfg.service_id;
-                }
-                tunnel_clients_mutex.lock();
-                for (tunnel_clients) |client_opt| {
-                    if (client_opt) |client| {
-                        client.service_id = cfg.service_id;
-                        client.target_host = target_host;
-                        client.target_port = target_port;
-                        client.default_token = cfg.default_token;
-                    }
-                }
-                tunnel_clients_mutex.unlock();
-            }
-
             // Poll for accept with timeout
             var fds = [_]posix.pollfd{
                 .{ .fd = listen_fd, .events = posix.POLL.IN, .revents = 0 },
@@ -1787,8 +1923,15 @@ pub fn main() !void {
             };
 
             tracePrint(enable_listener_trace, "[LISTENER] Accepted local connection: fd={} -> tunnel {}\n", .{ local_fd, next_tunnel });
-            tuneSocketBuffers(local_fd, cfg.socket_buffer_size);
-            applyTcpOptions(local_fd, tcpOptionsFromConfig(&cfg));
+            tuneSocketBuffers(local_fd, cfg.advanced.socket_buffer_size);
+            const tcp_opts = TcpOptions{
+                .nodelay = cfg.advanced.tcp_nodelay,
+                .keepalive = cfg.advanced.tcp_keepalive,
+                .keepalive_idle = cfg.advanced.tcp_keepalive_idle,
+                .keepalive_interval = cfg.advanced.tcp_keepalive_interval,
+                .keepalive_count = cfg.advanced.tcp_keepalive_count,
+            };
+            applyTcpOptions(local_fd, tcp_opts);
 
             // Handle new connection via round-robin tunnel selection (skip null tunnels during reconnection)
             var attempts: usize = 0;

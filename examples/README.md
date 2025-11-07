@@ -1,46 +1,17 @@
-# Floo Configuration Examples
+# Floo Examples
 
-This directory contains real-world configuration examples for common use cases.
+Each subdirectory provides ready-to-run `floos.toml`/`flooc.toml` pairs for a
+specific deployment pattern.
 
-## Available Examples
+| Example | Mode | Highlights |
+|---------|------|------------|
+| [`access-cloud-database/`](access-cloud-database/) | Forward | Keep databases private while admins connect over localhost |
+| [`expose-home-server/`](expose-home-server/) | Reverse | Publish Jellyfin/Emby from home through a VPS |
+| [`expose-multiple-services/`](expose-multiple-services/) | Reverse | Serve media + SSH simultaneously with per-service tokens |
+| [`multi-client-loadbalancing/`](multi-client-loadbalancing/) | Reverse | Run multiple flooc instances for round-robin load sharing |
+| [`reverse-forwarding-emby/`](reverse-forwarding-emby/) | Reverse | Minimal example focused on media streaming | 
+| [`through-corporate-proxy/`](through-corporate-proxy/) | Forward | Dial through SOCKS5/HTTP proxies while keeping traffic encrypted |
 
-### 🏠 [expose-home-server](expose-home-server/)
-**Use case:** Access your home media server (Emby, Plex) from anywhere
-**Mode:** Reverse tunneling (single service)
-**Setup:** flooc on home machine, floos on public server
-
-### 🔐 [expose-multiple-services](expose-multiple-services/)
-**Use case:** Expose both media server AND SSH through one tunnel
-**Mode:** Reverse tunneling (multiple services)
-**Setup:** One flooc serves multiple services
-
-### 💾 [access-cloud-database](access-cloud-database/)
-**Use case:** Securely access cloud database from local machine
-**Mode:** Forward tunneling (traditional)
-**Setup:** Connect to remote services through encrypted tunnel
-
-### 🏢 [through-corporate-proxy](through-corporate-proxy/)
-**Use case:** Connect through corporate SOCKS5/HTTP proxy
-**Mode:** Forward with proxy
-**Setup:** Bypass firewall restrictions
-
-### ⚡ [multi-client-loadbalancing](multi-client-loadbalancing/)
-**Use case:** High-throughput scenarios with load balancing
-**Mode:** Multiple parallel tunnels
-**Setup:** Maximize bandwidth utilization
-
-## Quick Start
-
-1. Choose the example that matches your use case
-2. Copy the config files
-3. Update `YOUR_SERVER_IP` and passwords
-4. Run `--doctor` to validate setup
-5. Start floos and flooc
-
-## Need Help?
-
-Run diagnostics before starting:
-```bash
-./floos --doctor floos.toml
-./flooc --doctor flooc.toml
-```
+All configs follow the same structure implemented in `src/config.zig`. Copy the
+pair that matches your use case, update secrets and IPs, then run `./floos` on
+the server and `./flooc` on the client. Use `--doctor` before going live.
