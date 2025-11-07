@@ -192,20 +192,30 @@ pub const UdpForwarder = struct {
     fn pruneExpiredSessions(self: *UdpForwarder, now: i128) void {
         if (self.timeout_ns == 0) return;
 
-        var expired = std.ArrayListUnmanaged(tunnel.StreamId){};
-        defer expired.deinit(self.allocator);
+        // Workaround for Zig compiler bug in Debug mode on some platforms
+        // Split into smaller parts to avoid genSetReg error
+        var expired_items = std.ArrayListUnmanaged(tunnel.StreamId){};
+        defer expired_items.deinit(self.allocator);
 
-        self.sessions_mutex.lock();
-        var iter = self.sessions.iterator();
-        while (iter.next()) |entry| {
-            const last = entry.value_ptr.*.last_activity_ns.load(.acquire);
-            if ((now - last) > self.timeout_ns) {
-                expired.append(self.allocator, entry.key_ptr.*) catch break;
+        {
+            self.sessions_mutex.lock();
+            defer self.sessions_mutex.unlock();
+
+            var iter = self.sessions.iterator();
+            while (iter.next()) |entry| {
+                const session_ptr = entry.value_ptr.*;
+                const last_activity = session_ptr.last_activity_ns.load(.acquire);
+                const time_elapsed = now - last_activity;
+
+                if (time_elapsed > self.timeout_ns) {
+                    const stream_id = entry.key_ptr.*;
+                    expired_items.append(self.allocator, stream_id) catch continue;
+                }
             }
         }
-        self.sessions_mutex.unlock();
 
-        for (expired.items) |stream_id| {
+        // Remove expired sessions outside the lock
+        for (expired_items.items) |stream_id| {
             self.removeSession(stream_id, false);
         }
     }
