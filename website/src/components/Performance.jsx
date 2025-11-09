@@ -6,9 +6,9 @@ export default function Performance() {
   const sectionRef = useRef(null)
 
   const benchmarks = [
-    { name: 'Floo', throughput: 29.4, color: 'var(--accent-cyan)' },
-    { name: 'Rathole', throughput: 18.1, color: 'var(--accent-purple)' },
-    { name: 'FRP', throughput: 10.0, color: 'var(--accent-pink)' }
+    { name: 'Floo', throughput: 30.9, color: 'var(--accent-cyan)' },
+    { name: 'Rathole', throughput: 16.6, color: 'var(--accent-purple)' },
+    { name: 'FRP', throughput: 9.2, color: 'var(--accent-pink)' }
   ]
 
   const maxThroughput = Math.max(...benchmarks.map(b => b.throughput))
@@ -36,7 +36,7 @@ export default function Performance() {
         <h2 className="section-title">Performance</h2>
 
         <div className="performance-subtitle">
-          Benchmark: Apple M1 MacBook Air | AEGIS-128L Cipher | iperf3
+          Benchmark: Apple M1 (4 vCPU) | Plaintext | Single Stream | iperf3
         </div>
 
         <div className="benchmark-chart">
@@ -73,12 +73,12 @@ export default function Performance() {
         <div className="comparison-grid">
           <div className="comparison-card">
             <div className="comparison-icon">⚡</div>
-            <div className="comparison-title">62% Faster</div>
+            <div className="comparison-title">86% Faster</div>
             <div className="comparison-subtitle">Than Rathole</div>
           </div>
           <div className="comparison-card">
             <div className="comparison-icon">🚀</div>
-            <div className="comparison-title">194% Faster</div>
+            <div className="comparison-title">236% Faster</div>
             <div className="comparison-subtitle">Than FRP</div>
           </div>
           <div className="comparison-card">

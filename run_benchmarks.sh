@@ -1,5 +1,5 @@
 #!/bin/bash
-# Comprehensive benchmark suite: raw loopback, floo plaintext/encrypted (all ciphers), frp, rathole
+# Comprehensive benchmark suite: raw loopback, Floo plaintext/encrypted (all ciphers), frp, rathole
 set -euo pipefail
 
 usage() {
@@ -7,11 +7,40 @@ usage() {
     exit 1
 }
 
+fatal() {
+    echo "fatal: $*" >&2
+    exit 1
+}
+
+require_cmd() {
+    local cmd=$1
+    command -v "${cmd}" >/dev/null 2>&1 || fatal "Required command '${cmd}' not found in PATH"
+}
+
 STREAMS=${FLOO_STREAMS:-4}
 DURATION=${FLOO_DURATION:-3}
 # Auto-detect parallel tunnels if not provided
 CPU_COUNT=$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 NUM_TUNNELS=${FLOO_TUNNELS:-$CPU_COUNT}
+if (( NUM_TUNNELS > 64 )); then
+    NUM_TUNNELS=64
+fi
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FLOO_BIN_DIR=${FLOO_BIN_DIR:-"${ROOT_DIR}/zig-out/bin"}
+
+if [[ -n "${FLOO_BENCH_DIR:-}" ]]; then
+    WORKDIR="${FLOO_BENCH_DIR}"
+    CLEAN_WORKDIR=0
+else
+    WORKDIR="$(mktemp -d /tmp/floo-bench.XXXXXX)"
+    CLEAN_WORKDIR=1
+fi
+LOG_DIR="${WORKDIR}/logs"
+mkdir -p "${LOG_DIR}"
+SUMMARY_FILE="${WORKDIR}/summary.tsv"
+RESULT_FILE="${WORKDIR}/results.tsv"
+: > "${RESULT_FILE}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -38,14 +67,37 @@ if ! [[ "${DURATION}" =~ ^[0-9]+$ ]] || ! [[ "${STREAMS}" =~ ^[0-9]+$ ]]; then
     exit 1
 fi
 
+require_cmd iperf3
+require_cmd awk
+require_cmd pkill
+require_cmd zig
+
+build_floo() {
+    local floos_path="${FLOO_BIN_DIR}/floos"
+    local flooc_path="${FLOO_BIN_DIR}/flooc"
+    if [[ "${FLOO_SKIP_BUILD:-0}" == "1" && -x "${floos_path}" && -x "${flooc_path}" ]]; then
+        return
+    fi
+    if [[ ! -x "${floos_path}" || ! -x "${flooc_path}" ]]; then
+        echo "[build] Compiling Floo binaries (ReleaseFast)"
+        (cd "${ROOT_DIR}" && zig build -Doptimize=ReleaseFast) >/dev/null
+        return
+    fi
+    if [[ "${FLOO_SKIP_BUILD:-0}" != "1" ]]; then
+        echo "[build] Refreshing Floo binaries (ReleaseFast)"
+        (cd "${ROOT_DIR}" && zig build -Doptimize=ReleaseFast) >/dev/null
+    fi
+}
+
 PSK="benchmark-test-key"
 TOKEN="floo-bench-token"
-SUMMARY_FILE="/tmp/floo_benchmark_summary.tsv"
-RESULT_FILE="/tmp/floo_benchmark_results.tsv"
-: > "${RESULT_FILE}"
+build_floo
 
 cleanup() {
     pkill -f "floos|flooc|rathole|frps|frpc|iperf3" 2>/dev/null || true
+    if [[ ${CLEAN_WORKDIR} -eq 1 ]]; then
+        rm -rf "${WORKDIR}"
+    fi
 }
 
 ensure_idle() {
@@ -84,10 +136,11 @@ record_result() {
 run_iperf() {
     local name=$1
     local port=$2
-    local outfile="/tmp/bench_${name}.log"
+    local streams=${3:-${STREAMS}}
+    local outfile="${LOG_DIR}/iperf_${name}.log"
 
     set +e
-    iperf3 -c 127.0.0.1 -p "${port}" -P "${STREAMS}" -t "${DURATION}" > "${outfile}" 2>&1
+    iperf3 -c 127.0.0.1 -p "${port}" -P "${streams}" -t "${DURATION}" > "${outfile}" 2>&1
     local status=$?
     set -e
 
@@ -98,7 +151,14 @@ run_iperf() {
     fi
 
     local line
-    line=$(grep "SUM" "${outfile}" | tail -1 || true)
+    if [[ "${streams}" -eq 1 ]]; then
+        line=$(grep -E "Gbits/sec" "${outfile}" | tail -1 || true)
+    else
+        line=$(grep "SUM" "${outfile}" | tail -1 || true)
+        if [[ -z "${line}" ]]; then
+            line=$(grep -E "Gbits/sec" "${outfile}" | tail -1 || true)
+        fi
+    fi
     if [[ -z "${line}" ]]; then
         # Single-stream runs omit the SUM row; fall back to the last throughput line.
         line=$(grep -E "Gbits/sec" "${outfile}" | tail -1 || true)
@@ -119,8 +179,16 @@ run_iperf() {
 
 start_iperf_server() {
     local port=$1
-    iperf3 -s -p "${port}" > /tmp/iperf_server_${port}.log 2>&1 &
+    iperf3 -s -p "${port}" > "${LOG_DIR}/iperf_server_${port}.log" 2>&1 &
     echo $!
+}
+
+stop_iperf_server() {
+    local pid=$1
+    if [[ -n "${pid}" ]]; then
+        kill "${pid}" 2>/dev/null || true
+        wait "${pid}" 2>/dev/null || true
+    fi
 }
 
 run_raw() {
@@ -129,9 +197,8 @@ run_raw() {
     local iperf_pid
     iperf_pid=$(start_iperf_server 9000)
     sleep 1
-    run_iperf "${name}" 9000 || true
-    kill "${iperf_pid}" 2>/dev/null || true
-    wait "${iperf_pid}" 2>/dev/null || true
+    run_iperf "${name}" 9000 1 || true
+    stop_iperf_server "${iperf_pid}"
 }
 
 write_floo_configs() {
@@ -241,24 +308,32 @@ run_floo() {
     local iperf_pid
     iperf_pid=$(start_iperf_server 9000)
 
-    local server_cfg="/tmp/floos_${label}.toml"
-    local client_cfg="/tmp/flooc_${label}.toml"
+    local server_cfg="${WORKDIR}/floos_${label}.toml"
+    local client_cfg="${WORKDIR}/flooc_${label}.toml"
     write_floo_configs "${cipher}" "${mode}" "${server_cfg}" "${client_cfg}"
 
-    ./zig-out/bin/floos "${server_cfg}" > "/tmp/floos_${label}.log" 2>&1 &
+    "${FLOO_BIN_DIR}/floos" "${server_cfg}" > "${LOG_DIR}/floos_${label}.log" 2>&1 &
     local floos_pid=$!
     sleep 1
 
-    ./zig-out/bin/flooc "${client_cfg}" > "/tmp/flooc_${label}.log" 2>&1 &
+    "${FLOO_BIN_DIR}/flooc" "${client_cfg}" > "${LOG_DIR}/flooc_${label}.log" 2>&1 &
     local flooc_pid=$!
-    sleep 2
+    if ! wait_for_port 127.0.0.1 9001 100 0.2; then
+        record_result "floo-${label}" "error (tunnel init)"
+        echo "[floo-${label}] tunnel failed to open port 9001"
+        stop_iperf_server "${iperf_pid}"
+        kill "${flooc_pid}" "${floos_pid}" 2>/dev/null || true
+        wait "${flooc_pid}" 2>/dev/null || true
+        wait "${floos_pid}" 2>/dev/null || true
+        return
+    fi
 
     run_iperf "floo-${label}" 9001 || true
 
-    kill "${flooc_pid}" "${floos_pid}" "${iperf_pid}" 2>/dev/null || true
+    stop_iperf_server "${iperf_pid}"
+    kill "${flooc_pid}" "${floos_pid}" 2>/dev/null || true
     wait "${flooc_pid}" 2>/dev/null || true
     wait "${floos_pid}" 2>/dev/null || true
-    wait "${iperf_pid}" 2>/dev/null || true
 }
 
 run_floo_reverse() {
@@ -270,34 +345,47 @@ run_floo_reverse() {
     local iperf_pid
     iperf_pid=$(start_iperf_server 9000)
 
-    local server_cfg="/tmp/floos_reverse_${label}.toml"
-    local client_cfg="/tmp/flooc_reverse_${label}.toml"
+    local server_cfg="${WORKDIR}/floos_reverse_${label}.toml"
+    local client_cfg="${WORKDIR}/flooc_reverse_${label}.toml"
     write_floo_reverse_configs "${cipher}" "${mode}" "${server_cfg}" "${client_cfg}"
 
-    ./zig-out/bin/floos "${server_cfg}" > "/tmp/floos_reverse_${label}.log" 2>&1 &
+    "${FLOO_BIN_DIR}/floos" "${server_cfg}" > "${LOG_DIR}/floos_reverse_${label}.log" 2>&1 &
     local floos_pid=$!
     sleep 1
 
-    ./zig-out/bin/flooc "${client_cfg}" > "/tmp/flooc_reverse_${label}.log" 2>&1 &
+    "${FLOO_BIN_DIR}/flooc" "${client_cfg}" > "${LOG_DIR}/flooc_reverse_${label}.log" 2>&1 &
     local flooc_pid=$!
-    sleep 2
+    if ! wait_for_port 127.0.0.1 9002 100 0.2; then
+        record_result "floo-reverse-${label}" "error (tunnel init)"
+        echo "[floo-reverse-${label}] tunnel failed to expose port 9002"
+        stop_iperf_server "${iperf_pid}"
+        kill "${flooc_pid}" "${floos_pid}" 2>/dev/null || true
+        wait "${flooc_pid}" 2>/dev/null || true
+        wait "${floos_pid}" 2>/dev/null || true
+        return
+    fi
 
     run_iperf "floo-reverse-${label}" 9002 || true
 
-    kill "${flooc_pid}" "${floos_pid}" "${iperf_pid}" 2>/dev/null || true
+    stop_iperf_server "${iperf_pid}"
+    kill "${flooc_pid}" "${floos_pid}" 2>/dev/null || true
     wait "${flooc_pid}" 2>/dev/null || true
     wait "${floos_pid}" 2>/dev/null || true
-    wait "${iperf_pid}" 2>/dev/null || true
 }
 
 run_rathole() {
     local name="rathole"
+    if ! command -v rathole >/dev/null 2>&1; then
+        record_result "${name}" "missing (rathole)"
+        echo "[${name}] skipped: rathole binary not found in PATH"
+        return
+    fi
     ensure_idle
     local iperf_pid
     iperf_pid=$(start_iperf_server 9000)
 
-    local server_cfg="/tmp/rathole_server.toml"
-    local client_cfg="/tmp/rathole_client.toml"
+    local server_cfg="${WORKDIR}/rathole_server.toml"
+    local client_cfg="${WORKDIR}/rathole_client.toml"
 
     cat > "${server_cfg}" <<EOF
 [server]
@@ -317,20 +405,20 @@ local_addr = "127.0.0.1:9000"
 token = "${TOKEN}"
 EOF
 
-    rathole --server "${server_cfg}" > /tmp/rathole_server.log 2>&1 &
+    rathole --server "${server_cfg}" > "${LOG_DIR}/rathole_server.log" 2>&1 &
     local rathole_server_pid=$!
     sleep 1
 
-    rathole --client "${client_cfg}" > /tmp/rathole_client.log 2>&1 &
+    rathole --client "${client_cfg}" > "${LOG_DIR}/rathole_client.log" 2>&1 &
     local rathole_client_pid=$!
     sleep 2
 
     run_iperf "${name}" 9100 || true
 
-    kill "${rathole_client_pid}" "${rathole_server_pid}" "${iperf_pid}" 2>/dev/null || true
+    stop_iperf_server "${iperf_pid}"
+    kill "${rathole_client_pid}" "${rathole_server_pid}" 2>/dev/null || true
     wait "${rathole_client_pid}" 2>/dev/null || true
     wait "${rathole_server_pid}" 2>/dev/null || true
-    wait "${iperf_pid}" 2>/dev/null || true
 }
 
 run_frp() {
@@ -351,8 +439,8 @@ run_frp() {
     local iperf_pid
     iperf_pid=$(start_iperf_server 9000)
 
-    local frps_cfg="/tmp/frps.ini"
-    local frpc_cfg="/tmp/frpc.ini"
+    local frps_cfg="${WORKDIR}/frps.ini"
+    local frpc_cfg="${WORKDIR}/frpc.ini"
 
     cat > "${frps_cfg}" <<EOF
 [common]
@@ -375,35 +463,35 @@ local_port = 9000
 remote_port = 9100
 EOF
 
-    frps -c "${frps_cfg}" > /tmp/frps_benchmark.log 2>&1 &
+    frps -c "${frps_cfg}" > "${LOG_DIR}/frps_benchmark.log" 2>&1 &
     local frps_pid=$!
     if ! wait_for_port 127.0.0.1 7200; then
         record_result "${name}" "error (frps)"
         echo "[${name}] frps failed to open port 7200"
-        kill "${frps_pid}" "${iperf_pid}" 2>/dev/null || true
+        stop_iperf_server "${iperf_pid}"
+        kill "${frps_pid}" 2>/dev/null || true
         wait "${frps_pid}" 2>/dev/null || true
-        wait "${iperf_pid}" 2>/dev/null || true
         return
     fi
 
-    frpc -c "${frpc_cfg}" > /tmp/frpc_benchmark.log 2>&1 &
+    frpc -c "${frpc_cfg}" > "${LOG_DIR}/frpc_benchmark.log" 2>&1 &
     local frpc_pid=$!
     if ! wait_for_port 127.0.0.1 9100; then
         record_result "${name}" "error (frpc)"
         echo "[${name}] frpc failed to expose port 9100"
-        kill "${frpc_pid}" "${frps_pid}" "${iperf_pid}" 2>/dev/null || true
+        stop_iperf_server "${iperf_pid}"
+        kill "${frpc_pid}" "${frps_pid}" 2>/dev/null || true
         wait "${frpc_pid}" 2>/dev/null || true
         wait "${frps_pid}" 2>/dev/null || true
-        wait "${iperf_pid}" 2>/dev/null || true
         return
     fi
 
     run_iperf "${name}" 9100 || true
 
-    kill "${frpc_pid}" "${frps_pid}" "${iperf_pid}" 2>/dev/null || true
+    stop_iperf_server "${iperf_pid}"
+    kill "${frpc_pid}" "${frps_pid}" 2>/dev/null || true
     wait "${frpc_pid}" 2>/dev/null || true
     wait "${frps_pid}" 2>/dev/null || true
-    wait "${iperf_pid}" 2>/dev/null || true
 }
 
 trap cleanup EXIT
@@ -420,11 +508,11 @@ echo ""
 echo "=== Testing forward mode ==="
 declare -a FLOO_TEST_MATRIX=(
     "none:plaintext:plaintext"
-    "ChaChaPoly:encrypted:chacha20"
-    "AES256GCM:encrypted:aes256gcm"
-    "AESGCM:encrypted:aes128gcm"
-    "AEGIS128L:encrypted:aegis128l"
-    "AEGIS256:encrypted:aegis256"
+    "chacha20poly1305:encrypted:chacha20"
+    "aes256gcm:encrypted:aes256gcm"
+    "aes128gcm:encrypted:aes128gcm"
+    "aegis128l:encrypted:aegis128l"
+    "aegis256:encrypted:aegis256"
 )
 
 for spec in "${FLOO_TEST_MATRIX[@]}"; do
@@ -480,4 +568,6 @@ for key in frp rathole; do
 done
 
 echo ""
-echo "Logs saved under /tmp/bench_<name>.log (iperf) and /tmp/floo* /tmp/rathole_* for tunnel output."
+echo "Artifacts saved under ${WORKDIR}"
+echo "  - iperf logs: ${LOG_DIR}"
+echo "  - summary: ${SUMMARY_FILE}"
