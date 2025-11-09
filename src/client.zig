@@ -104,10 +104,13 @@ fn clientApplyThreadAffinity(index_opt: ?usize) void {
 fn setThreadAffinityLinux(cpu_index: usize) void {
     if (builtin.target.os.tag != .linux) return;
     const linux = std.os.linux;
-    var mask: linux.cpu_set_t = undefined;
-    linux.CPU_ZERO(&mask);
-    const limited = cpu_index % linux.CPU_SETSIZE;
-    linux.CPU_SET(@intCast(@as(c_uint, @intCast(limited))), &mask);
+    // cpu_set_t is an array of ulongs, zero it manually since CPU_ZERO macro not available
+    var mask: linux.cpu_set_t = [_]c_ulong{0} ** 16;
+    // Set the bit for this CPU (cpu_set_t is bit array)
+    const limited = cpu_index % (16 * @bitSizeOf(c_ulong));
+    const word_idx = limited / @bitSizeOf(c_ulong);
+    const bit_idx = limited % @bitSizeOf(c_ulong);
+    mask[word_idx] |= @as(c_ulong, 1) << @intCast(bit_idx);
     _ = linux.sched_setaffinity(0, @sizeOf(linux.cpu_set_t), &mask) catch {};
 }
 

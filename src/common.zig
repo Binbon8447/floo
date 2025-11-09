@@ -287,10 +287,16 @@ pub const RateLimiter = struct {
 
         // Refill tokens based on time elapsed
         if (elapsed >= self.refill_interval_ns) {
-            const elapsed_ticks = @divTrunc(elapsed, self.refill_interval_ns);
-            if (elapsed_ticks > 0) {
+            // Split into smaller calculation to avoid genSetReg compiler error on Linux Debug builds
+            const elapsed_128: i128 = elapsed;
+            const interval_128: i128 = self.refill_interval_ns;
+            const elapsed_ticks_i128 = @divTrunc(elapsed_128, interval_128);
+
+            if (elapsed_ticks_i128 > 0) {
+                // Safely convert to u32
+                const elapsed_ticks_u64: u64 = @intCast(@min(elapsed_ticks_i128, std.math.maxInt(u32)));
                 const tokens_to_add = @min(
-                    @as(u32, @intCast(elapsed_ticks)),
+                    @as(u32, @intCast(elapsed_ticks_u64)),
                     self.max_tokens,
                 );
 
