@@ -2,6 +2,18 @@
 
 All notable changes to Floo will be documented in this file.
 
+## [0.1.5] - 2025-11-19
+
+### Changed
+- Migrated to Zig master branch (0.16.0-dev) for latest performance improvements.
+- Updated CI/CD workflows to support Zig master.
+- Fixed Linux compilation issues regarding `sigset_t` initialization.
+
+### Performance
+- **22.2 Gbps** AES-128-GCM throughput (Reverse Mode, M1).
+- AES-GCM now outperforms AEGIS ciphers on hardware with AES-NI/ARMv8 Crypto extensions.
+- Outperforms Rathole by ~1.5x and FRP by ~2.1x.
+
 ## [0.1.4] - 2025-11-09
 
 ### Performance
