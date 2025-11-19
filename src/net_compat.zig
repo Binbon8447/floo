@@ -39,7 +39,7 @@ pub const Address = extern union {
         var addr: u32 = 0;
         var octets: u32 = 0;
         var seen_octets: u3 = 0;
-        
+
         for (host) |char| {
             if (char == '.') {
                 if (octets > 255) return error.InvalidIp;
@@ -63,7 +63,7 @@ pub const Address = extern union {
         // Wait, actually: 1.2.3.4 -> 0x01020304.
         // std.mem.readInt reads bytes.
         // Let's just use the byte array logic which is safer.
-        
+
         // Simpler way:
         var it = std.mem.splitScalar(u8, host, '.');
         var bytes: [4]u8 = undefined;
@@ -74,7 +74,7 @@ pub const Address = extern union {
             index += 1;
         }
         if (index != 4) return error.InvalidIp;
-        
+
         return initIp4(bytes, port);
     }
 
@@ -90,7 +90,7 @@ pub const Address = extern union {
         var hints: c.addrinfo = undefined;
         // hints must be zeroed?
         @memset(@as([*]u8, @ptrCast(&hints))[0..@sizeOf(c.addrinfo)], 0);
-        
+
         // Handle platform differences for flags (packed struct on macOS, int on Linux)
         if (builtin.os.tag.isDarwin()) {
             hints.flags = @bitCast(@as(u32, 0));
@@ -149,10 +149,7 @@ pub const Address = extern union {
                 // But posix.sockaddr.in.addr is u32.
                 // Let's just cast pointer to *[4]u8.
                 const bytes = @as(*const [4]u8, @ptrCast(&addr));
-                try writer.print("{}.{}.{}.{}:{}", .{
-                    bytes[0], bytes[1], bytes[2], bytes[3],
-                    std.mem.bigToNative(u16, self.in.port)
-                });
+                try writer.print("{}.{}.{}.{}:{}", .{ bytes[0], bytes[1], bytes[2], bytes[3], std.mem.bigToNative(u16, self.in.port) });
             },
             posix.AF.INET6 => {
                 try writer.print("[IPv6]:{}", .{std.mem.bigToNative(u16, self.in6.port)});

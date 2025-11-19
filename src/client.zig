@@ -561,7 +561,7 @@ const LocalConnection = struct {
 
     fn create(allocator: std.mem.Allocator, service_id: tunnel.ServiceId, stream_id: tunnel.StreamId, local_fd: posix.fd_t, tunnel_client: *TunnelClient) !*LocalConnection {
         const io_batch = tunnel_client.cfg.advanced.io_batch_bytes;
-        
+
         const header_len: usize = 7;
         const send_capacity = header_len + io_batch + noise.TAG_LEN + 32;
         const send_buffer = try allocator.alignedAlloc(u8, .@"64", send_capacity);
@@ -1206,10 +1206,10 @@ const TunnelClient = struct {
         @setRuntimeSafety(false);
         const message_header_len: usize = 7;
         const io_batch = self.cfg.advanced.io_batch_bytes;
-        
+
         // Ensure we don't overflow the buffer
         const max_read = @min(io_batch, conn.send_buffer.len - message_header_len - noise.TAG_LEN);
-        
+
         const recv_slice = conn.send_buffer[message_header_len..][0..max_read];
         const n = posix.recv(conn.local_fd, recv_slice, 0) catch |err| switch (err) {
             error.WouldBlock => return,
@@ -1663,7 +1663,7 @@ pub fn main() !void {
     if (builtin.os.tag != .windows) {
         var act = posix.Sigaction{
             .handler = .{ .handler = posix.SIG.IGN },
-            .mask = 0,
+            .mask = std.mem.zeroes(posix.sigset_t),
             .flags = 0,
         };
         posix.sigaction(posix.SIG.PIPE, &act, null);
@@ -2032,9 +2032,9 @@ pub fn main() !void {
             while (!shutdown_flag.load(.acquire)) {
                 processSignalNotifications(&shutdown_notice_printed);
                 {
-                const ns = 250 * std.time.ns_per_ms;
-                posix.nanosleep(ns / std.time.ns_per_s, ns % std.time.ns_per_s);
-            }
+                    const ns = 250 * std.time.ns_per_ms;
+                    posix.nanosleep(ns / std.time.ns_per_s, ns % std.time.ns_per_s);
+                }
 
                 // Periodic session cleanup
                 forwarder.cleanupExpiredSessions() catch {};

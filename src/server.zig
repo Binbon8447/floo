@@ -457,14 +457,14 @@ const ReverseListener = struct {
     fn acceptorThread(self: *ReverseListener) void {
         while (self.running.load(.acquire)) {
             if (!self.tunnel_conn.running.load(.acquire)) break;
-            
+
             const client_fd_raw = c.accept(self.listen_fd, null, null);
             if (client_fd_raw == -1) {
                 // Check errno if needed, but for now just continue/break logic
                 // Assuming blocking accept, or non-blocking?
                 // posix.accept was catching error.Interrupted.
                 // c.accept returns -1.
-                continue; 
+                continue;
             }
             const client_fd: posix.fd_t = client_fd_raw;
             _ = posix.fcntl(client_fd, posix.F.SETFD, posix.FD_CLOEXEC) catch {};
@@ -554,7 +554,7 @@ const Stream = struct {
 
     fn create(allocator: std.mem.Allocator, service_id: tunnel.ServiceId, stream_id: tunnel.StreamId, target_fd: posix.fd_t, tunnel_conn: *TunnelConnection) !*Stream {
         const io_batch = tunnel_conn.cfg.advanced.io_batch_bytes;
-        
+
         const header_len: usize = 7;
         const frame_capacity = header_len + io_batch + noise.TAG_LEN + 32;
         const frame_buffer = try allocator.alignedAlloc(u8, .@"64", frame_capacity);
@@ -1041,10 +1041,10 @@ const TunnelConnection = struct {
         @setRuntimeSafety(false);
         const message_header_len: usize = 7;
         const io_batch = self.cfg.advanced.io_batch_bytes;
-        
+
         // Ensure we don't overflow the buffer
         const max_read = @min(io_batch, stream.frame_buffer.len - message_header_len - noise.TAG_LEN);
-        
+
         // Read directly into frame buffer at offset 7
         const recv_slice = stream.frame_buffer[message_header_len..][0..max_read];
         const n = posix.recv(stream.target_fd, recv_slice, 0) catch |err| switch (err) {
@@ -1081,7 +1081,7 @@ const TunnelConnection = struct {
 
         const payload_len = message_header_len + n;
         const slice = stream.frame_buffer[0 .. payload_len + noise.TAG_LEN];
-        
+
         self.channel.sendDataInPlace(slice, payload_len) catch |err| {
             std.debug.print("[STREAM {}] send() error: {}\n", .{ stream.stream_id, err });
             self.handleSendFailure(err);
@@ -1348,7 +1348,7 @@ pub fn main() !void {
     if (builtin.os.tag != .windows) {
         var act = posix.Sigaction{
             .handler = .{ .handler = posix.SIG.IGN },
-            .mask = 0,
+            .mask = std.mem.zeroes(posix.sigset_t),
             .flags = 0,
         };
         posix.sigaction(posix.SIG.PIPE, &act, null);
