@@ -55,6 +55,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/server.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         }),
     });
     server.root_module.addOptions("build_options", build_options);
@@ -68,6 +69,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/client.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         }),
     });
     client.root_module.addOptions("build_options", build_options);
@@ -98,6 +100,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/protocol.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         }),
     });
     protocol_tests.root_module.addOptions("build_options", build_options);
@@ -107,6 +110,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/config.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         }),
     });
     config_tests.root_module.addOptions("build_options", build_options);
@@ -116,6 +120,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/noise.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         }),
     });
     noise_tests.root_module.addOptions("build_options", build_options);
@@ -125,6 +130,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/proxy.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         }),
     });
     proxy_tests.root_module.addOptions("build_options", build_options);
@@ -134,6 +140,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/udp_session.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         }),
     });
     udp_session_tests.root_module.addOptions("build_options", build_options);
@@ -221,6 +228,7 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = b.path("src/server.zig"),
                 .target = resolved_target,
                 .optimize = .ReleaseFast,
+                .link_libc = true,
             }),
         });
         server_release.root_module.addOptions("build_options", build_options);
@@ -230,6 +238,7 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = b.path("src/client.zig"),
                 .target = resolved_target,
                 .optimize = .ReleaseFast,
+                .link_libc = true,
             }),
         });
         client_release.root_module.addOptions("build_options", build_options);
