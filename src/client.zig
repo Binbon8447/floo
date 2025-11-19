@@ -556,8 +556,6 @@ const LocalConnection = struct {
     local_fd: posix.fd_t,
     tunnel: *TunnelClient,
     fd_closed: std.atomic.Value(bool), // Track if local_fd is closed
-    local_closed: bool,
-    remote_closed: bool,
     ref_count: std.atomic.Value(usize),
     read_buffer: []u8,
     send_buffer: []u8,
@@ -579,8 +577,6 @@ const LocalConnection = struct {
             .local_fd = local_fd,
             .tunnel = tunnel_client,
             .fd_closed = std.atomic.Value(bool).init(false),
-            .local_closed = false,
-            .remote_closed = false,
             .ref_count = std.atomic.Value(usize).init(1),
             .read_buffer = read_buffer,
             .send_buffer = send_buffer,
@@ -781,22 +777,20 @@ const TunnelClient = struct {
             var iter = self.connections.iterator();
             while (iter.next()) |entry| {
                 const conn_ptr = entry.value_ptr.*;
-                if (!conn_ptr.local_closed) {
-                    conn_ptr.acquireRef();
-                    poll_entries.append(global_allocator, .{ .local = conn_ptr }) catch {
-                        conn_ptr.releaseRef();
-                        continue;
-                    };
-                    poll_fds.append(global_allocator, .{
-                        .fd = conn_ptr.local_fd,
-                        .events = posix.POLL.IN,
-                        .revents = 0,
-                    }) catch {
-                        _ = poll_entries.pop();
-                        conn_ptr.releaseRef();
-                        continue;
-                    };
-                }
+                conn_ptr.acquireRef();
+                poll_entries.append(global_allocator, .{ .local = conn_ptr }) catch {
+                    conn_ptr.releaseRef();
+                    continue;
+                };
+                poll_fds.append(global_allocator, .{
+                    .fd = conn_ptr.local_fd,
+                    .events = posix.POLL.IN,
+                    .revents = 0,
+                }) catch {
+                    _ = poll_entries.pop();
+                    conn_ptr.releaseRef();
+                    continue;
+                };
             }
             self.connections_mutex.unlock();
 
@@ -956,25 +950,15 @@ const TunnelClient = struct {
                 tracePrint(enable_tunnel_trace, "[CLIENT] CLOSE stream_id={}\n", .{close_msg.stream_id});
 
                 self.connections_mutex.lock();
-                const ptr = self.connections.getPtr(close_msg.stream_id);
+                const maybe_conn = self.connections.fetchRemove(close_msg.stream_id);
+                self.connections_mutex.unlock();
 
-                if (ptr) |conn_ptr| {
-                    const conn = conn_ptr.*;
-                    conn.remote_closed = true;
-                    _ = posix.shutdown(conn.local_fd, .send) catch {};
-
-                    if (conn.local_closed) {
-                        _ = self.connections.remove(close_msg.stream_id);
-                        self.connections_mutex.unlock();
-                        conn.releaseRef();
-                        conn.stop();
-                        std.debug.print("[CLIENT] Connection {} cleaned up after CLOSE message (full close)\n", .{close_msg.stream_id});
-                    } else {
-                        self.connections_mutex.unlock();
-                        tracePrint(enable_tunnel_trace, "[CLIENT] Connection {} remote closed (half-close)\n", .{close_msg.stream_id});
-                    }
+                if (maybe_conn) |entry| {
+                    entry.value.stop();
+                    entry.value.releaseRef();
+                    std.debug.print("[CLIENT] Connection {} cleaned up after CLOSE message\n", .{close_msg.stream_id});
                 } else {
-                    self.connections_mutex.unlock();
+                    // Connection already cleaned itself up
                     tracePrint(enable_tunnel_trace, "[CLIENT] Connection {} already removed (self-cleanup)\n", .{close_msg.stream_id});
                 }
             },
@@ -1233,12 +1217,8 @@ const TunnelClient = struct {
         };
 
         if (n == 0) {
-            conn.local_closed = true;
             self.sendCloseFrame(conn.service_id, conn.stream_id);
-            if (conn.remote_closed) {
-                return error.ConnectionClosed;
-            }
-            return;
+            return error.ConnectionClosed;
         }
 
         if (!encrypted) {
@@ -1680,6 +1660,16 @@ pub fn main() !void {
     defer diagnostics.flushEncryptStats("client", &encrypt_total_ns, &encrypt_calls);
     defer diagnostics.flushThroughputStats("client", &tunnel_tx_bytes, &tunnel_rx_bytes);
     defer cleanupSignalPipe();
+
+    // Ignore SIGPIPE to prevent process termination on write errors
+    if (builtin.os.tag != .windows) {
+        var act = posix.Sigaction{
+            .handler = .{ .handler = posix.SIG.IGN },
+            .mask = 0,
+            .flags = 0,
+        };
+        posix.sigaction(posix.SIG.PIPE, &act, null);
+    }
 
     var exit_code: u8 = 0;
     defer if (exit_code != 0) posix.exit(exit_code);
