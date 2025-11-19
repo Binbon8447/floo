@@ -557,14 +557,11 @@ const LocalConnection = struct {
     tunnel: *TunnelClient,
     fd_closed: std.atomic.Value(bool), // Track if local_fd is closed
     ref_count: std.atomic.Value(usize),
-    read_buffer: []u8,
     send_buffer: []u8,
 
     fn create(allocator: std.mem.Allocator, service_id: tunnel.ServiceId, stream_id: tunnel.StreamId, local_fd: posix.fd_t, tunnel_client: *TunnelClient) !*LocalConnection {
         const io_batch = tunnel_client.cfg.advanced.io_batch_bytes;
-        const read_buffer = try allocator.alloc(u8, io_batch);
-        errdefer allocator.free(read_buffer);
-
+        
         const header_len: usize = 7;
         const send_capacity = header_len + io_batch + noise.TAG_LEN + 32;
         const send_buffer = try allocator.alloc(u8, send_capacity);
@@ -578,7 +575,6 @@ const LocalConnection = struct {
             .tunnel = tunnel_client,
             .fd_closed = std.atomic.Value(bool).init(false),
             .ref_count = std.atomic.Value(usize).init(1),
-            .read_buffer = read_buffer,
             .send_buffer = send_buffer,
         };
         return conn;
@@ -598,7 +594,6 @@ const LocalConnection = struct {
 
     fn destroyInternal(self: *LocalConnection) void {
         self.stop();
-        if (self.read_buffer.len > 0) global_allocator.free(self.read_buffer);
         if (self.send_buffer.len > 0) global_allocator.free(self.send_buffer);
         global_allocator.destroy(self);
     }
@@ -1209,8 +1204,12 @@ const TunnelClient = struct {
 
     fn forwardLocalData(self: *TunnelClient, conn: *LocalConnection) anyerror!void {
         const message_header_len: usize = 7;
-        const encrypted = self.channel.isEncrypted();
-        const recv_slice: []u8 = if (encrypted) conn.read_buffer else conn.send_buffer[message_header_len..];
+        const io_batch = self.cfg.advanced.io_batch_bytes;
+        
+        // Ensure we don't overflow the buffer
+        const max_read = @min(io_batch, conn.send_buffer.len - message_header_len - noise.TAG_LEN);
+        
+        const recv_slice = conn.send_buffer[message_header_len..][0..max_read];
         const n = posix.recv(conn.local_fd, recv_slice, 0) catch |err| switch (err) {
             error.WouldBlock => return,
             else => return err,
@@ -1221,7 +1220,7 @@ const TunnelClient = struct {
             return error.ConnectionClosed;
         }
 
-        if (!encrypted) {
+        if (!self.channel.isEncrypted()) {
             conn.send_buffer[0] = @intFromEnum(tunnel.MessageType.data);
             std.mem.writeInt(u16, conn.send_buffer[1..3], conn.service_id, .big);
             std.mem.writeInt(u32, conn.send_buffer[3..7], conn.stream_id, .big);
@@ -1235,17 +1234,15 @@ const TunnelClient = struct {
             return;
         }
 
-        const data_msg = tunnel.DataMsg{
-            .service_id = conn.service_id,
-            .stream_id = conn.stream_id,
-            .data = conn.read_buffer[0..n],
-        };
-        const encoded_len = data_msg.encodeInto(conn.send_buffer[0..]) catch {
-            return error.ConnectionClosed;
-        };
+        // Zero-copy path for encrypted data
+        conn.send_buffer[0] = @intFromEnum(tunnel.MessageType.data);
+        std.mem.writeInt(u16, conn.send_buffer[1..3], conn.service_id, .big);
+        std.mem.writeInt(u32, conn.send_buffer[3..7], conn.stream_id, .big);
+        // Data is already at offset 7
 
-        const slice = conn.send_buffer[0 .. encoded_len + noise.TAG_LEN];
-        self.channel.sendDataInPlace(slice, encoded_len) catch |err| {
+        const payload_len = message_header_len + n;
+        const slice = conn.send_buffer[0 .. payload_len + noise.TAG_LEN];
+        self.channel.sendDataInPlace(slice, payload_len) catch |err| {
             std.debug.print("[LOCAL {}] send() error: {}\n", .{ conn.stream_id, err });
             self.handleSendFailure(err);
             return error.ConnectionClosed;

@@ -550,14 +550,11 @@ const Stream = struct {
     tunnel: *TunnelConnection,
     fd_closed: std.atomic.Value(bool), // Track if target_fd is closed
     ref_count: std.atomic.Value(usize),
-    read_buffer: []u8,
     frame_buffer: []u8,
 
     fn create(allocator: std.mem.Allocator, service_id: tunnel.ServiceId, stream_id: tunnel.StreamId, target_fd: posix.fd_t, tunnel_conn: *TunnelConnection) !*Stream {
         const io_batch = tunnel_conn.cfg.advanced.io_batch_bytes;
-        const read_buffer = try allocator.alloc(u8, io_batch);
-        errdefer allocator.free(read_buffer);
-
+        
         const header_len: usize = 7;
         const frame_capacity = header_len + io_batch + noise.TAG_LEN + 32;
         const frame_buffer = try allocator.alloc(u8, frame_capacity);
@@ -571,7 +568,6 @@ const Stream = struct {
             .tunnel = tunnel_conn,
             .fd_closed = std.atomic.Value(bool).init(false),
             .ref_count = std.atomic.Value(usize).init(1),
-            .read_buffer = read_buffer,
             .frame_buffer = frame_buffer,
         };
         return stream;
@@ -591,7 +587,6 @@ const Stream = struct {
 
     fn destroyInternal(self: *Stream) void {
         self.stop();
-        if (self.read_buffer.len > 0) global_allocator.free(self.read_buffer);
         if (self.frame_buffer.len > 0) global_allocator.free(self.frame_buffer);
         global_allocator.destroy(self);
     }
@@ -1044,9 +1039,13 @@ const TunnelConnection = struct {
 
     fn forwardTargetData(self: *TunnelConnection, stream: *Stream) anyerror!void {
         const message_header_len: usize = 7;
-        const encrypted = self.channel.isEncrypted();
-
-        const recv_slice: []u8 = if (encrypted) stream.read_buffer else stream.frame_buffer[message_header_len..];
+        const io_batch = self.cfg.advanced.io_batch_bytes;
+        
+        // Ensure we don't overflow the buffer
+        const max_read = @min(io_batch, stream.frame_buffer.len - message_header_len - noise.TAG_LEN);
+        
+        // Read directly into frame buffer at offset 7
+        const recv_slice = stream.frame_buffer[message_header_len..][0..max_read];
         const n = posix.recv(stream.target_fd, recv_slice, 0) catch |err| switch (err) {
             error.WouldBlock => return,
             else => return err,
@@ -1058,7 +1057,7 @@ const TunnelConnection = struct {
             return error.ConnectionClosed;
         }
 
-        if (!encrypted) {
+        if (!self.channel.isEncrypted()) {
             stream.frame_buffer[0] = @intFromEnum(tunnel.MessageType.data);
             std.mem.writeInt(u16, stream.frame_buffer[1..3], stream.service_id, .big);
             std.mem.writeInt(u32, stream.frame_buffer[3..7], stream.stream_id, .big);
@@ -1072,18 +1071,17 @@ const TunnelConnection = struct {
             return;
         }
 
-        const data_msg = tunnel.DataMsg{
-            .service_id = stream.service_id,
-            .stream_id = stream.stream_id,
-            .data = stream.read_buffer[0..n],
-        };
+        // For encrypted channel, constructs DataMsg manually in the buffer to avoid copy
+        // DataMsg format: [type:1][service_id:2][stream_id:4][data:n]
+        stream.frame_buffer[0] = @intFromEnum(tunnel.MessageType.data);
+        std.mem.writeInt(u16, stream.frame_buffer[1..3], stream.service_id, .big);
+        std.mem.writeInt(u32, stream.frame_buffer[3..7], stream.stream_id, .big);
+        // Data is already at offset 7
 
-        const encoded_len = data_msg.encodeInto(stream.frame_buffer[0..]) catch {
-            return error.ConnectionClosed;
-        };
-
-        const slice = stream.frame_buffer[0 .. encoded_len + noise.TAG_LEN];
-        self.channel.sendDataInPlace(slice, encoded_len) catch |err| {
+        const payload_len = message_header_len + n;
+        const slice = stream.frame_buffer[0 .. payload_len + noise.TAG_LEN];
+        
+        self.channel.sendDataInPlace(slice, payload_len) catch |err| {
             std.debug.print("[STREAM {}] send() error: {}\n", .{ stream.stream_id, err });
             self.handleSendFailure(err);
             return error.ConnectionClosed;

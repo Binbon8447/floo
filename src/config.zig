@@ -39,7 +39,7 @@ pub const AdvancedSettings = struct {
     // Network tuning
     socket_buffer_size: u32 = 4 * 1024 * 1024, // 4MB default
     udp_timeout_seconds: u64 = 60,
-    io_batch_bytes: usize = 64 * 1024, // size of per-stream IO buffers
+    io_batch_bytes: usize = 128 * 1024, // size of per-stream IO buffers
     pin_threads: bool = true, // pin tunnel threads to CPU cores when available
 
     // TCP tuning
