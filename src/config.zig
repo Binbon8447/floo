@@ -174,7 +174,7 @@ pub const ServerConfig = struct {
     }
 
     pub fn loadFromFile(allocator: std.mem.Allocator, path: []const u8) !ServerConfig {
-        const file = std.fs.cwd().openFile(path, .{}) catch |err| {
+        const content = std.fs.cwd().readFileAlloc(path, allocator, @enumFromInt(1024 * 1024)) catch |err| {
             if (err == error.FileNotFound) {
                 std.debug.print("[CONFIG] File not found: {s}. Create it using examples/ templates.\n", .{path});
                 var cfg = try ServerConfig.init(allocator);
@@ -185,9 +185,6 @@ pub const ServerConfig = struct {
             }
             return err;
         };
-        defer file.close();
-
-        const content = try file.readToEndAlloc(allocator, 1024 * 1024);
         defer allocator.free(content);
 
         var config = try parseServerConfig(allocator, content);
@@ -486,7 +483,7 @@ pub const ClientConfig = struct {
     }
 
     pub fn loadFromFile(allocator: std.mem.Allocator, path: []const u8) !ClientConfig {
-        const file = std.fs.cwd().openFile(path, .{}) catch |err| {
+        const content = std.fs.cwd().readFileAlloc(path, allocator, @enumFromInt(1024 * 1024)) catch |err| {
             if (err == error.FileNotFound) {
                 std.debug.print("[CONFIG] File not found: {s}. Create it using examples/ templates.\n", .{path});
                 var cfg = try ClientConfig.init(allocator);
@@ -497,9 +494,6 @@ pub const ClientConfig = struct {
             }
             return err;
         };
-        defer file.close();
-
-        const content = try file.readToEndAlloc(allocator, 1024 * 1024);
         defer allocator.free(content);
 
         var config = try parseClientConfig(allocator, content);

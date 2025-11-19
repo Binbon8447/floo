@@ -1,5 +1,6 @@
 const std = @import("std");
 const posix = std.posix;
+const net = @import("net_compat.zig");
 const tunnel = @import("tunnel.zig");
 const noise = @import("noise.zig");
 const common = @import("common.zig");
@@ -10,7 +11,7 @@ const common = @import("common.zig");
 pub const UdpForwarder = struct {
     allocator: std.mem.Allocator,
     service_id: tunnel.ServiceId,
-    target_addr: std.net.Address,
+    target_addr: net.Address,
     tunnel_conn: *anyopaque,
     send_fn: *const fn (conn: *anyopaque, buffer: []u8, payload_len: usize) anyerror!void,
     running: std.atomic.Value(bool),
@@ -27,7 +28,7 @@ pub const UdpForwarder = struct {
         send_fn: *const fn (conn: *anyopaque, buffer: []u8, payload_len: usize) anyerror!void,
         timeout_seconds: u64,
     ) !*UdpForwarder {
-        const target_addr = try std.net.Address.resolveIp(target_host, target_port);
+        const target_addr = try net.Address.resolveIp(target_host, target_port);
         const forwarder = try allocator.create(UdpForwarder);
         forwarder.* = .{
             .allocator = allocator,
@@ -48,7 +49,7 @@ pub const UdpForwarder = struct {
             return error.InvalidSourceAddress;
         }
 
-        const now = @as(i64, @intCast(std.time.nanoTimestamp()));
+        const now = @as(i64, @intCast(common.nanoTimestamp()));
         self.pruneExpiredSessions(now);
 
         const session = try self.ensureSession(udp_msg.stream_id, udp_msg.source_addr, udp_msg.source_port, now);
@@ -167,7 +168,7 @@ pub const UdpForwarder = struct {
             };
             if (n <= 0) continue;
 
-            session.last_activity_ns.store(@as(i64, @intCast(std.time.nanoTimestamp())), .release);
+            session.last_activity_ns.store(@as(i64, @intCast(common.nanoTimestamp())), .release);
 
             var encode_buf: [70016]u8 = undefined;
             const udp_msg = tunnel.UdpDataMsg{

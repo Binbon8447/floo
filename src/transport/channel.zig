@@ -81,7 +81,7 @@ pub const Channel = struct {
 
             var handshake_timer_start: i128 = 0;
             if (params.handshake_metrics) |_| {
-                handshake_timer_start = std.time.nanoTimestamp();
+                handshake_timer_start = common.nanoTimestamp();
             }
 
             const handshake = noise.noiseXXHandshake(
@@ -96,7 +96,7 @@ pub const Channel = struct {
             };
 
             if (params.handshake_metrics) |metrics| {
-                const stop = std.time.nanoTimestamp();
+                const stop = common.nanoTimestamp();
                 metrics.elapsed_ns = stop - handshake_timer_start;
             }
 
@@ -219,9 +219,9 @@ pub const Channel = struct {
         const encrypted_len = payload_len + noise.TAG_LEN;
 
         if (self.send_cipher) |*cipher| {
-            const start_ns = std.time.nanoTimestamp();
+            const start_ns = common.nanoTimestamp();
             try cipher.encrypt(buffer[0..payload_len], buffer[0..encrypted_len]);
-            const end_ns = std.time.nanoTimestamp();
+            const end_ns = common.nanoTimestamp();
 
             if (self.stats) |stats| {
                 const delta: u64 = @intCast(end_ns - start_ns);

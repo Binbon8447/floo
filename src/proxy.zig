@@ -1,5 +1,6 @@
 const std = @import("std");
 const posix = std.posix;
+const net = @import("net_compat.zig");
 const common = @import("common.zig");
 
 const sendAllToFd = common.sendAllToFd;
@@ -125,7 +126,7 @@ pub fn connectViaSocks5(
     target_port: u16,
 ) !posix.fd_t {
     // Connect to proxy server
-    const proxy_addr = try std.net.Address.resolveIp(proxy_host, proxy_port);
+    const proxy_addr = try net.Address.resolveIp(proxy_host, proxy_port);
     const fd = try posix.socket(proxy_addr.any.family, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
     errdefer posix.close(fd);
 
@@ -206,16 +207,16 @@ pub fn connectViaSocks5(
 
     // Address type and address
     // Try to parse as IP first, otherwise use domain name
-    if (std.net.Address.parseIp4(target_host, 0)) |addr| {
+    if (net.Address.parseIp4(target_host, 0)) |addr| {
         request_buf[req_offset] = SOCKS5_ADDR_IPV4;
         req_offset += 1;
-        @memcpy(request_buf[req_offset .. req_offset + 4], std.mem.asBytes(&addr.in.sa.addr));
+        @memcpy(request_buf[req_offset .. req_offset + 4], std.mem.asBytes(&addr.in.addr));
         req_offset += 4;
     } else |_| {
-        if (std.net.Address.parseIp6(target_host, 0)) |addr| {
+        if (net.Address.parseIp6(target_host, 0)) |addr| {
             request_buf[req_offset] = SOCKS5_ADDR_IPV6;
             req_offset += 1;
-            @memcpy(request_buf[req_offset .. req_offset + 16], &addr.in6.sa.addr);
+            @memcpy(request_buf[req_offset .. req_offset + 16], &addr.in6.addr);
             req_offset += 16;
         } else |_| {
             // Use domain name
@@ -287,7 +288,7 @@ pub fn connectViaHttpConnect(
     target_port: u16,
 ) !posix.fd_t {
     // Connect to proxy server
-    const proxy_addr = try std.net.Address.resolveIp(proxy_host, proxy_port);
+    const proxy_addr = try net.Address.resolveIp(proxy_host, proxy_port);
     const fd = try posix.socket(proxy_addr.any.family, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
     errdefer posix.close(fd);
 
@@ -401,7 +402,7 @@ pub fn connectWithProxy(
     if (proxy_config) |proxy| {
         if (proxy.proxy_type == .none) {
             // No proxy, direct connection
-            const addr = try std.net.Address.resolveIp(target_host, target_port);
+            const addr = try net.Address.resolveIp(target_host, target_port);
             const fd = try posix.socket(addr.any.family, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
             errdefer posix.close(fd);
             try posix.connect(fd, &addr.any, addr.getOsSockLen());
@@ -432,7 +433,7 @@ pub fn connectWithProxy(
     }
 
     // No proxy config provided, direct connection
-    const addr = try std.net.Address.resolveIp(target_host, target_port);
+    const addr = try net.Address.resolveIp(target_host, target_port);
     const fd = try posix.socket(addr.any.family, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
     errdefer posix.close(fd);
     try posix.connect(fd, &addr.any, addr.getOsSockLen());

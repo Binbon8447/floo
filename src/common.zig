@@ -2,6 +2,16 @@ const std = @import("std");
 const builtin = @import("builtin");
 const posix = std.posix;
 const config = @import("config.zig");
+const net = @import("net_compat.zig");
+
+pub fn nanoTimestamp() i128 {
+    const ts = posix.clock_gettime(posix.CLOCK.MONOTONIC) catch return 0;
+    return @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
+}
+
+pub fn milliTimestamp() i64 {
+    return @intCast(@divTrunc(nanoTimestamp(), std.time.ns_per_ms));
+}
 
 inline fn socketHandle(fd: posix.fd_t) posix.socket_t {
     if (builtin.target.os.tag == .windows) {
@@ -232,16 +242,16 @@ pub fn writeFrameLocked(fd: posix.fd_t, payload: []const u8) !void {
     }
 }
 
-/// Format a std.net.Address into a temporary buffer for logging.
-pub fn formatAddress(addr: std.net.Address, buf: []u8) []const u8 {
+/// Format a net.Address into a temporary buffer for logging.
+pub fn formatAddress(addr: net.Address, buf: []u8) []const u8 {
     return std.fmt.bufPrint(buf, "{f}", .{addr}) catch "unavailable";
 }
 
-/// Resolve IPv4/IPv6/DNS host strings into a std.net.Address.
-pub fn resolveHostPort(host: []const u8, port: u16) !std.net.Address {
-    return std.net.Address.parseIp4(host, port) catch
-        std.net.Address.parseIp6(host, port) catch
-        std.net.Address.resolveIp(host, port);
+/// Resolve IPv4/IPv6/DNS host strings into a net.Address.
+pub fn resolveHostPort(host: []const u8, port: u16) !net.Address {
+    return net.Address.parseIp4(host, port) catch
+        net.Address.parseIp6(host, port) catch
+        net.Address.resolveIp(host, port);
 }
 
 /// Receive an exact number of bytes from a socket file descriptor.
@@ -275,7 +285,7 @@ pub const RateLimiter = struct {
             .tokens = std.atomic.Value(u32).init(max_per_second),
             .max_tokens = max_per_second,
             .refill_interval_ns = @intCast(@divTrunc(std.time.ns_per_s, max_per_second)),
-            .last_refill = std.atomic.Value(i64).init(@intCast(std.time.nanoTimestamp())),
+            .last_refill = std.atomic.Value(i64).init(@intCast(nanoTimestamp())),
         };
     }
 
@@ -302,7 +312,7 @@ pub const RateLimiter = struct {
         }
 
         // Refill if needed
-        const now: i64 = @intCast(std.time.nanoTimestamp());
+        const now: i64 = @intCast(nanoTimestamp());
         const last = self.last_refill.load(.monotonic);
         const elapsed = now - last;
 

@@ -1,5 +1,6 @@
 const std = @import("std");
 const posix = std.posix;
+const net = @import("net_compat.zig");
 const tunnel = @import("tunnel.zig");
 const noise = @import("noise.zig");
 const udp_session = @import("udp_session.zig");
@@ -92,7 +93,7 @@ pub const UdpForwarder = struct {
             if (n == 0) continue;
 
             // Convert source address
-            const source_addr = std.net.Address.initPosix(@ptrCast(@alignCast(&from_addr)));
+            const source_addr = net.Address.initPosix(@ptrCast(@alignCast(&from_addr)));
 
             // Get or create session for this local source
             const session = self.session_manager.getOrCreate(source_addr) catch |err| {
@@ -117,15 +118,15 @@ pub const UdpForwarder = struct {
             switch (source_addr.any.family) {
                 posix.AF.INET => {
                     const ipv4 = source_addr.in;
-                    @memcpy(addr_bytes[0..4], std.mem.asBytes(&ipv4.sa.addr));
+                    @memcpy(addr_bytes[0..4], std.mem.asBytes(&ipv4.addr));
                     addr_len = 4;
-                    source_port = ipv4.getPort();
+                    source_port = std.mem.bigToNative(u16, ipv4.port);
                 },
                 posix.AF.INET6 => {
                     const ipv6 = source_addr.in6;
-                    @memcpy(&addr_bytes, &ipv6.sa.addr);
+                    @memcpy(&addr_bytes, &ipv6.addr);
                     addr_len = 16;
-                    source_port = ipv6.getPort();
+                    source_port = std.mem.bigToNative(u16, ipv6.port);
                 },
                 else => continue,
             }

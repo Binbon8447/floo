@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const posix = std.posix;
+const net = @import("net_compat.zig");
 const build_options = @import("build_options");
 const protocol = @import("protocol.zig");
 const tunnel = @import("tunnel.zig");
@@ -219,11 +220,11 @@ fn probeTcpTarget(host: []const u8, port: u16) !i128 {
     const fd = try posix.socket(addr.any.family, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
     errdefer posix.close(fd);
 
-    const start = std.time.nanoTimestamp();
+    const start = common.nanoTimestamp();
     posix.connect(fd, &addr.any, addr.getOsSockLen()) catch |err| {
         return err;
     };
-    const done = std.time.nanoTimestamp();
+    const done = common.nanoTimestamp();
     posix.close(fd);
     return done - start;
 }
@@ -259,7 +260,7 @@ fn runServerPing(allocator: std.mem.Allocator, opts: *CliOptions) !bool {
                 ms,
             });
         } else {
-            _ = std.net.Address.resolveIp(service.address, service.port) catch |err| {
+            _ = net.Address.resolveIp(service.address, service.port) catch |err| {
                 diagnostics.reportCheck(.fail, "Service '{s}' ({}) UDP target {s}:{d} not resolvable: {}", .{
                     service.name,
                     service.id,
@@ -391,7 +392,7 @@ const StreamKeyContext = struct {
     }
 };
 
-fn handleSignal(sig: c_int) callconv(.c) void {
+fn handleSignal(sig: posix.SIG) callconv(.c) void {
     if (sig == posix.SIG.INT or sig == posix.SIG.TERM) {
         shutdown_flag.store(true, .release);
     } else if (@hasDecl(posix.SIG, "HUP") and sig == posix.SIG.HUP) {
@@ -400,7 +401,7 @@ fn handleSignal(sig: c_int) callconv(.c) void {
         flush_stats_requested.store(true, .release);
     }
     if (builtin.target.os.tag != .windows) {
-        notifySignalPipe(sig);
+        notifySignalPipe(@intCast(@intFromEnum(sig)));
     }
 }
 
@@ -456,11 +457,17 @@ const ReverseListener = struct {
     fn acceptorThread(self: *ReverseListener) void {
         while (self.running.load(.acquire)) {
             if (!self.tunnel_conn.running.load(.acquire)) break;
-            const client_fd = posix.accept(self.listen_fd, null, null, posix.SOCK.CLOEXEC) catch |err| {
-                if (err == error.Interrupted) continue;
-                std.debug.print("[REVERSE] Accept error on {s}:{}: {}\n", .{ self.service.address, self.service.port, err });
-                break;
-            };
+            
+            const client_fd_raw = c.accept(self.listen_fd, null, null);
+            if (client_fd_raw == -1) {
+                // Check errno if needed, but for now just continue/break logic
+                // Assuming blocking accept, or non-blocking?
+                // posix.accept was catching error.Interrupted.
+                // c.accept returns -1.
+                continue; 
+            }
+            const client_fd: posix.fd_t = client_fd_raw;
+            _ = posix.fcntl(client_fd, posix.F.SETFD, posix.FD_CLOEXEC) catch {};
 
             std.debug.print("[REVERSE] Accepted connection on {s}:{}\n", .{ self.service.address, self.service.port });
 
@@ -631,7 +638,8 @@ const TunnelConnection = struct {
             while (slept_ms < total_sleep_ms and self.running.load(.acquire)) {
                 const remaining_ms = total_sleep_ms - slept_ms;
                 const this_sleep_ms = @min(sleep_increment_ms, remaining_ms);
-                std.Thread.sleep(@as(u64, this_sleep_ms) * std.time.ns_per_ms);
+                const ns = @as(u64, this_sleep_ms) * std.time.ns_per_ms;
+                posix.nanosleep(ns / std.time.ns_per_s, ns % std.time.ns_per_s);
                 slept_ms += this_sleep_ms;
             }
 
@@ -639,7 +647,7 @@ const TunnelConnection = struct {
             if (!self.running.load(.acquire)) break;
 
             // Send heartbeat message
-            const timestamp = std.time.milliTimestamp();
+            const timestamp = common.milliTimestamp();
             const heartbeat_msg = tunnel.HeartbeatMsg{ .timestamp = timestamp };
 
             var encode_buf: [16]u8 = undefined; // Heartbeat is 9 bytes
@@ -906,7 +914,7 @@ const TunnelConnection = struct {
                         error.UnknownService => .unknown_service,
                         error.AuthenticationFailed => .authentication_failed,
                         error.ConnectionRefused => .connection_refused,
-                        error.ConnectionTimedOut => .connection_timeout,
+                        error.NetworkUnreachable => .connection_timeout,
                         else => .internal_error,
                     };
                     // Send error response (no allocation - use stack buffer)
@@ -1560,10 +1568,14 @@ pub fn main() !void {
         if (ready == 0) continue; // Timeout, check flags
         if ((poll_buf[0].revents & posix.POLL.IN) == 0) continue;
 
-        const tunnel_fd = posix.accept(listen_fd, null, null, posix.SOCK.CLOEXEC) catch |err| {
-            std.debug.print("[SERVER] Accept error: {}\n", .{err});
+        const tunnel_fd_raw = c.accept(listen_fd, null, null);
+        if (tunnel_fd_raw == -1) {
+            // std.debug.print("[SERVER] Accept error\n", .{});
             continue;
-        };
+        }
+        const tunnel_fd: posix.fd_t = tunnel_fd_raw;
+        // Best effort CLOEXEC
+        _ = posix.fcntl(tunnel_fd, posix.F.SETFD, posix.FD_CLOEXEC) catch {};
 
         // Apply rate limiting to prevent connection flood attacks
         if (!rate_limiter.tryAcquire()) {

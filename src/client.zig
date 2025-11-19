@@ -1,5 +1,6 @@
 const std = @import("std");
 const posix = std.posix;
+const net = @import("net_compat.zig");
 const build_options = @import("build_options");
 const protocol = @import("protocol.zig");
 const tunnel = @import("tunnel.zig");
@@ -345,14 +346,14 @@ fn loadClientConfigWithOverrides(allocator: std.mem.Allocator, opts: *CliOptions
 }
 
 const PingResult = struct {
-    remote_addr: std.net.Address,
+    remote_addr: net.Address,
     connect_ns: i128,
     handshake_ns: i128,
     total_ns: i128,
 };
 
 fn performClientPing(cfg: *const config.ClientConfig) !PingResult {
-    const connect_start = std.time.nanoTimestamp();
+    const connect_start = common.nanoTimestamp();
 
     const remote_host = try cfg.getServerHost();
     const remote_port = try cfg.getServerPort();
@@ -372,7 +373,7 @@ fn performClientPing(cfg: *const config.ClientConfig) !PingResult {
     );
     errdefer posix.close(fd);
 
-    const connect_done = std.time.nanoTimestamp();
+    const connect_done = common.nanoTimestamp();
 
     const canonical_cipher = config.canonicalCipher(cfg);
     var handshake_metrics = transport.HandshakeMetrics{};
@@ -392,9 +393,9 @@ fn performClientPing(cfg: *const config.ClientConfig) !PingResult {
         tmp.deinit();
     }
 
-    const total_ns = std.time.nanoTimestamp() - connect_start;
+    const total_ns = common.nanoTimestamp() - connect_start;
     posix.close(fd);
-    const remote_addr = try std.net.Address.resolveIp(remote_host, remote_port);
+    const remote_addr = try net.Address.resolveIp(remote_host, remote_port);
     return .{
         .remote_addr = remote_addr,
         .connect_ns = connect_done - connect_start,
@@ -487,7 +488,7 @@ fn runClientDoctor(allocator: std.mem.Allocator, opts: *CliOptions) !bool {
 
     const remote_host = try cfg.getServerHost();
     const remote_port = try cfg.getServerPort();
-    const remote_addr = std.net.Address.resolveIp(remote_host, remote_port) catch |err| {
+    const remote_addr = net.Address.resolveIp(remote_host, remote_port) catch |err| {
         diagnostics.reportCheck(.fail, "Unable to resolve remote {s}:{d}: {}", .{ remote_host, remote_port, err });
         return false;
     };
@@ -539,16 +540,12 @@ fn runClientDoctor(allocator: std.mem.Allocator, opts: *CliOptions) !bool {
     return !had_fail;
 }
 
-fn handleSignal(sig: c_int) callconv(.c) void {
+fn handleSignal(sig: posix.SIG) callconv(.c) void {
     if (sig == posix.SIG.INT or sig == posix.SIG.TERM) {
         shutdown_flag.store(true, .release);
-    } else if (@hasDecl(posix.SIG, "HUP") and sig == posix.SIG.HUP) {
-        sighup_requested.store(true, .release);
-    } else if (@hasDecl(posix.SIG, "USR1") and sig == posix.SIG.USR1) {
-        flush_stats_requested.store(true, .release);
     }
     if (builtin.target.os.tag != .windows) {
-        notifySignalPipe(sig);
+        notifySignalPipe(@intCast(@intFromEnum(sig)));
     }
 }
 
@@ -696,7 +693,7 @@ const TunnelClient = struct {
             .udp_forwarder = null,
             .transport = .tcp, // Default to TCP for now
             .heartbeat_timeout_ms = cfg.advanced.heartbeat_timeout_seconds * 1000, // Convert to milliseconds
-            .last_heartbeat_time = std.atomic.Value(i64).init(std.time.milliTimestamp()), // Initialize to current time
+            .last_heartbeat_time = std.atomic.Value(i64).init(common.milliTimestamp()), // Initialize to current time
             .default_token = cfg.token,
             .cfg = cfg,
         };
@@ -755,7 +752,7 @@ const TunnelClient = struct {
         while (self.running.load(.acquire) and !shutdown_flag.load(.acquire)) {
             // Check heartbeat timeout if enabled
             if (self.heartbeat_timeout_ms > 0) {
-                const now = std.time.milliTimestamp();
+                const now = common.milliTimestamp();
                 const last_heartbeat = self.last_heartbeat_time.load(.acquire);
                 const elapsed_ms: u32 = @intCast(now - last_heartbeat);
 
@@ -977,7 +974,7 @@ const TunnelClient = struct {
             .heartbeat => {
                 // Received heartbeat from server - update last heartbeat time
                 const heartbeat_msg = try tunnel.HeartbeatMsg.decode(message_slice);
-                self.last_heartbeat_time.store(std.time.milliTimestamp(), .release);
+                self.last_heartbeat_time.store(common.milliTimestamp(), .release);
                 tracePrint(enable_tunnel_trace, "[HEARTBEAT] Received from server: timestamp={}\n", .{heartbeat_msg.timestamp});
             },
             .version => {
@@ -1039,7 +1036,7 @@ const TunnelClient = struct {
                     // Send error back
                     const error_code: tunnel.ErrorCode = switch (err) {
                         error.ConnectionRefused => .connection_refused,
-                        error.ConnectionTimedOut => .connection_timeout,
+                        error.NetworkUnreachable => .connection_timeout,
                         else => .service_unavailable,
                     };
                     const error_msg = tunnel.ConnectErrorMsg{
@@ -1425,10 +1422,13 @@ fn tcpServiceListener(ctx_ptr: *anyopaque) void {
         const ready = posix.poll(&fds, 1000) catch continue; // 1s timeout
         if (ready == 0) continue; // Timeout, check shutdown
 
-        const local_fd = posix.accept(listen_fd, null, null, posix.SOCK.CLOEXEC) catch |err| {
-            std.debug.print("[TCP-SERVICE] Accept error for service_id={}: {}\n", .{ ctx.service_id, err });
+        const local_fd_raw = c.accept(listen_fd, null, null);
+        if (local_fd_raw == -1) {
+            // std.debug.print("[TCP-SERVICE] Accept error\n", .{});
             continue;
-        };
+        }
+        const local_fd: posix.fd_t = local_fd_raw;
+        _ = posix.fcntl(local_fd, posix.F.SETFD, posix.FD_CLOEXEC) catch {};
 
         tracePrint(enable_listener_trace, "[TCP-SERVICE] Accepted connection on service_id={}: fd={} -> tunnel {}\n", .{ ctx.service_id, local_fd, next_tunnel });
         tuneSocketBuffers(local_fd, ctx.socket_buffer_size);
@@ -1487,7 +1487,8 @@ fn tunnelThreadWithReconnection(params_ptr: *TunnelConnectionParams) void {
         if (params.cfg.advanced.proxy_url.len > 0) {
             proxy_cfg_opt = proxy.ProxyConfig.parseUrl(global_allocator, params.cfg.advanced.proxy_url) catch |err| {
                 std.debug.print("[TUNNEL {}] Invalid proxy URL: {}\n", .{ params.tunnel_index, err });
-                std.Thread.sleep(retry_delay_ms * std.time.ns_per_ms);
+                const ns = retry_delay_ms * std.time.ns_per_ms;
+                posix.nanosleep(ns / std.time.ns_per_s, ns % std.time.ns_per_s);
                 retry_delay_ms = @min(retry_delay_ms * params.cfg.advanced.reconnect_backoff_multiplier, params.cfg.advanced.reconnect_max_delay_ms);
                 continue;
             };
@@ -1512,7 +1513,10 @@ fn tunnelThreadWithReconnection(params_ptr: *TunnelConnectionParams) void {
             params.remote_port,
         ) catch |err| {
             std.debug.print("[TUNNEL {}] Connection failed (attempt {}): {}, retrying in {}ms...\n", .{ params.tunnel_index, attempt, err, retry_delay_ms });
-            std.Thread.sleep(retry_delay_ms * std.time.ns_per_ms);
+            {
+                const ns = retry_delay_ms * std.time.ns_per_ms;
+                posix.nanosleep(ns / std.time.ns_per_s, ns % std.time.ns_per_s);
+            }
             retry_delay_ms = @min(retry_delay_ms * params.cfg.advanced.reconnect_backoff_multiplier, params.cfg.advanced.reconnect_max_delay_ms);
             continue;
         };
@@ -1539,7 +1543,10 @@ fn tunnelThreadWithReconnection(params_ptr: *TunnelConnectionParams) void {
             params.static_keypair,
         ) catch |err| {
             std.debug.print("[TUNNEL {}] Failed to create client: {}\n", .{ params.tunnel_index, err });
-            std.Thread.sleep(retry_delay_ms * std.time.ns_per_ms);
+            {
+                const ns = retry_delay_ms * std.time.ns_per_ms;
+                posix.nanosleep(ns / std.time.ns_per_s, ns % std.time.ns_per_s);
+            }
             retry_delay_ms = @min(retry_delay_ms * params.cfg.advanced.reconnect_backoff_multiplier, params.cfg.advanced.reconnect_max_delay_ms);
             continue;
         };
@@ -1568,7 +1575,10 @@ fn tunnelThreadWithReconnection(params_ptr: *TunnelConnectionParams) void {
         }
 
         std.debug.print("[TUNNEL {}] Disconnected, reconnecting in {}ms...\n", .{ params.tunnel_index, retry_delay_ms });
-        std.Thread.sleep(retry_delay_ms * std.time.ns_per_ms);
+        {
+            const ns = retry_delay_ms * std.time.ns_per_ms;
+            posix.nanosleep(ns / std.time.ns_per_s, ns % std.time.ns_per_s);
+        }
     }
 
     std.debug.print("[TUNNEL {}] Thread exiting\n", .{params.tunnel_index});
@@ -1917,7 +1927,8 @@ pub fn main() !void {
             } else if (service.transport == .udp) {
                 // Wait for first tunnel to be available
                 while (loadTunnelClient(tunnel_clients, &tunnel_clients_mutex, 0) == null and !shutdown_flag.load(.acquire)) {
-                    std.Thread.sleep(100 * std.time.ns_per_ms);
+                    const ns = 100 * std.time.ns_per_ms;
+                    posix.nanosleep(ns / std.time.ns_per_s, ns % std.time.ns_per_s);
                 }
 
                 if (loadTunnelClient(tunnel_clients, &tunnel_clients_mutex, 0)) |first_client| {
@@ -1958,7 +1969,10 @@ pub fn main() !void {
         // Wait for shutdown signal
         while (!shutdown_flag.load(.acquire)) {
             processSignalNotifications(&shutdown_notice_printed);
-            std.Thread.sleep(250 * std.time.ns_per_ms);
+            {
+                const ns = 250 * std.time.ns_per_ms;
+                posix.nanosleep(ns / std.time.ns_per_s, ns % std.time.ns_per_s);
+            }
         }
     } else if (default_transport == .udp) {
         // Legacy single-service UDP mode
@@ -1968,7 +1982,10 @@ pub fn main() !void {
         // Wait for first tunnel to be available
         while (loadTunnelClient(tunnel_clients, &tunnel_clients_mutex, 0) == null and !shutdown_flag.load(.acquire)) {
             processSignalNotifications(&shutdown_notice_printed);
-            std.Thread.sleep(100 * std.time.ns_per_ms);
+            {
+                const ns = 100 * std.time.ns_per_ms;
+                posix.nanosleep(ns / std.time.ns_per_s, ns % std.time.ns_per_s);
+            }
         }
 
         if (loadTunnelClient(tunnel_clients, &tunnel_clients_mutex, 0)) |first_client| {
@@ -2005,7 +2022,10 @@ pub fn main() !void {
             // Wait for shutdown signal
             while (!shutdown_flag.load(.acquire)) {
                 processSignalNotifications(&shutdown_notice_printed);
-                std.Thread.sleep(250 * std.time.ns_per_ms);
+                {
+                const ns = 250 * std.time.ns_per_ms;
+                posix.nanosleep(ns / std.time.ns_per_s, ns % std.time.ns_per_s);
+            }
 
                 // Periodic session cleanup
                 forwarder.cleanupExpiredSessions() catch {};
@@ -2037,10 +2057,13 @@ pub fn main() !void {
             const ready = posix.poll(&fds, 1000) catch continue; // 1s timeout
             if (ready == 0) continue; // Timeout, check flags
 
-            const local_fd = posix.accept(listen_fd, null, null, posix.SOCK.CLOEXEC) catch |err| {
-                std.debug.print("[LISTENER] Accept error: {}\n", .{err});
+            const local_fd_raw = c.accept(listen_fd, null, null);
+            if (local_fd_raw == -1) {
+                // std.debug.print("[LISTENER] Accept error\n", .{});
                 continue;
-            };
+            }
+            const local_fd: posix.fd_t = local_fd_raw;
+            _ = posix.fcntl(local_fd, posix.F.SETFD, posix.FD_CLOEXEC) catch {};
 
             tracePrint(enable_listener_trace, "[LISTENER] Accepted local connection: fd={} -> tunnel {}\n", .{ local_fd, next_tunnel });
             tuneSocketBuffers(local_fd, cfg.advanced.socket_buffer_size);

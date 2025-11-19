@@ -1,6 +1,8 @@
 const std = @import("std");
 const posix = std.posix;
+const net = @import("net_compat.zig");
 const tunnel = @import("tunnel.zig");
+const common = @import("common.zig");
 
 /// UDP session key - identifies a unique UDP "connection" by source address
 /// We store the raw sockaddr to avoid issues with Address union
@@ -9,7 +11,7 @@ pub const SessionKey = struct {
     addr_bytes: [16]u8, // IPv4 uses first 4 bytes, IPv6 uses all 16
     port: u16, // Network byte order
 
-    pub fn initFromAddress(addr: std.net.Address) SessionKey {
+    pub fn initFromAddress(addr: net.Address) SessionKey {
         var key: SessionKey = undefined;
         key.family = @intCast(addr.any.family);
         key.addr_bytes = [_]u8{0} ** 16;
@@ -17,13 +19,13 @@ pub const SessionKey = struct {
         switch (addr.any.family) {
             posix.AF.INET => {
                 const ipv4 = addr.in;
-                @memcpy(key.addr_bytes[0..4], std.mem.asBytes(&ipv4.sa.addr));
-                key.port = ipv4.getPort();
+                @memcpy(key.addr_bytes[0..4], std.mem.asBytes(&ipv4.addr));
+                key.port = ipv4.port;
             },
             posix.AF.INET6 => {
                 const ipv6 = addr.in6;
-                @memcpy(&key.addr_bytes, &ipv6.sa.addr);
-                key.port = ipv6.getPort();
+                @memcpy(&key.addr_bytes, &ipv6.addr);
+                key.port = ipv6.port;
             },
             else => unreachable,
         }
@@ -49,23 +51,23 @@ pub const SessionKey = struct {
 /// UDP session context
 pub const UdpSession = struct {
     stream_id: tunnel.StreamId,
-    source_addr: std.net.Address,
+    source_addr: net.Address,
     last_activity_ns: i128, // Nanoseconds since epoch
 
-    pub fn init(stream_id: tunnel.StreamId, source_addr: std.net.Address) UdpSession {
+    pub fn init(stream_id: tunnel.StreamId, source_addr: net.Address) UdpSession {
         return .{
             .stream_id = stream_id,
             .source_addr = source_addr,
-            .last_activity_ns = std.time.nanoTimestamp(),
+            .last_activity_ns = common.nanoTimestamp(),
         };
     }
 
     pub fn touch(self: *UdpSession) void {
-        self.last_activity_ns = std.time.nanoTimestamp();
+        self.last_activity_ns = common.nanoTimestamp();
     }
 
     pub fn isExpired(self: *const UdpSession, timeout_seconds: u64) bool {
-        const now = std.time.nanoTimestamp();
+        const now = common.nanoTimestamp();
         const timeout_ns = @as(i128, timeout_seconds) * std.time.ns_per_s;
         return (now - self.last_activity_ns) > timeout_ns;
     }
@@ -100,7 +102,7 @@ pub const UdpSessionManager = struct {
     }
 
     /// Get or create session for a source address
-    pub fn getOrCreate(self: *UdpSessionManager, source_addr: std.net.Address) !UdpSession {
+    pub fn getOrCreate(self: *UdpSessionManager, source_addr: net.Address) !UdpSession {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -167,9 +169,9 @@ pub const UdpSessionManager = struct {
 
 // Tests
 test "SessionKey equality and hashing" {
-    const addr1 = try std.net.Address.parseIp4("127.0.0.1", 8080);
-    const addr2 = try std.net.Address.parseIp4("127.0.0.1", 8080);
-    const addr3 = try std.net.Address.parseIp4("127.0.0.1", 8081);
+    const addr1 = try net.Address.parseIp4("127.0.0.1", 8080);
+    const addr2 = try net.Address.parseIp4("127.0.0.1", 8080);
+    const addr3 = try net.Address.parseIp4("127.0.0.1", 8081);
 
     const key1 = SessionKey.initFromAddress(addr1);
     const key2 = SessionKey.initFromAddress(addr2);
@@ -181,14 +183,14 @@ test "SessionKey equality and hashing" {
 }
 
 test "UdpSession expiration" {
-    const addr = try std.net.Address.parseIp4("127.0.0.1", 8080);
+    const addr = try net.Address.parseIp4("127.0.0.1", 8080);
     var session = UdpSession.init(123, addr);
 
     // Fresh session should not be expired
     try std.testing.expect(!session.isExpired(60));
 
     // Simulate old session by setting past timestamp
-    session.last_activity_ns = std.time.nanoTimestamp() - (61 * std.time.ns_per_s);
+    session.last_activity_ns = common.nanoTimestamp() - (61 * std.time.ns_per_s);
 
     // Should now be expired with 60 second timeout
     try std.testing.expect(session.isExpired(60));
@@ -199,8 +201,8 @@ test "UdpSessionManager basic operations" {
     var manager = UdpSessionManager.init(allocator);
     defer manager.deinit();
 
-    const addr1 = try std.net.Address.parseIp4("192.168.1.1", 12345);
-    const addr2 = try std.net.Address.parseIp4("192.168.1.2", 12346);
+    const addr1 = try net.Address.parseIp4("192.168.1.1", 12345);
+    const addr2 = try net.Address.parseIp4("192.168.1.2", 12346);
 
     // Create first session
     const session1 = try manager.getOrCreate(addr1);
